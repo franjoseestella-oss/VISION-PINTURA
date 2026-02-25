@@ -17,8 +17,8 @@ git remote add origin git@github.com:franjoseestella-oss/VISION-PINTURA.git
 echo [3/4] Ajustando rama a main...
 git branch -M main
 
-echo [4/4] Haciendo push via SSH con clave explicita...
-git -c core.sshCommand="ssh -i C:/Users/franj/.ssh/id_vision_pintura -o StrictHostKeyChecking=no -o IdentitiesOnly=yes" push -u origin main -f
+echo [4/4] Haciendo push via SSH (clave sin passphrase)...
+git -c core.sshCommand="C:/Windows/System32/OpenSSH/ssh.exe -i C:/Users/franj/.ssh/id_vision_pintura2 -o StrictHostKeyChecking=no -o IdentitiesOnly=yes" push -u origin main
 
 echo.
 if %ERRORLEVEL% == 0 (
