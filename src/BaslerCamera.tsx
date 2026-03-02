@@ -1,0 +1,1031 @@
+import { useState, useEffect, useRef } from 'react';
+
+// ─── Tipos reales basados en BaslerCameraCameraParams.h (acA1920-48gm) ────────
+
+type PixelFormat = 'Mono8' | 'Mono10' | 'Mono10p';
+type ExposureAuto = 'Off' | 'Once' | 'Continuous';
+type GainAuto = 'Off' | 'Once' | 'Continuous';
+type AcquisitionMode = 'Continuous' | 'SingleFrame';
+type TriggerMode = 'Off' | 'On';
+type TriggerSource = 'Software' | 'Line1' | 'Line3' | 'Action1';
+type TriggerSelector = 'AcquisitionStart' | 'FrameStart';
+type TransmissionType = 'Unicast' | 'Multicast' | 'LimitedBroadcast' | 'SubnetDirectedBroadcast';
+type GevDriver = 'WindowsFilterDriver' | 'SocketDriver';
+type ConnectionMode = 'auto' | 'serial' | 'ip';
+type ConnectionStatus = 'disconnected' | 'scanning' | 'connecting' | 'connected' | 'error';
+
+interface BaslerDevice {
+    index: number;
+    modelName: string;        // e.g. acA1920-48gm
+    serialNumber: string;     // e.g. 40088454
+    deviceType: 'GigE';
+    ipAddress: string;
+    subnetMask: string;
+    macAddress: string;
+    firmwareVersion: string;
+    status: 'available' | 'connected' | 'error';
+}
+
+interface TLConfig {
+    // BaslerCameraTLParams — Transport Layer GigE
+    heartbeatTimeout: number;        // ms, default 1000
+    connectionGuardEnable: boolean;  // PylonGigEConnectionGuard
+    readTimeout: number;             // ms
+    writeTimeout: number;            // ms
+    maxRetryCountRead: number;
+    maxRetryCountWrite: number;
+    migrationModeEnable: boolean;    // SFNC 1.x → 2.x node mapping
+    // IP persistente (ChangeIpConfiguration / SetPersistentIpAddress)
+    enablePersistentIp: boolean;
+    enableDhcp: boolean;
+    persistentIp: string;
+    persistentSubnet: string;
+    persistentGateway: string;
+}
+
+interface CameraConfig {
+    // Conexión
+    connectionMode: ConnectionMode;
+    serialNumber: string;
+    ipAddress: string;
+    timeout: number;           // ms
+    // Imagen
+    pixelFormat: PixelFormat;
+    width: number;             // max 1920
+    height: number;            // max 1200
+    offsetX: number;
+    offsetY: number;
+    // Adquisición
+    acquisitionMode: AcquisitionMode;
+    acquisitionFrameRateEnable: boolean;
+    acquisitionFrameRateAbs: number;   // float fps
+    // Exposición
+    exposureAuto: ExposureAuto;
+    exposureTimeAbs: number;   // µs
+    // Ganancia
+    gainAuto: GainAuto;
+    gainRaw: number;           // raw integer units
+    // Trigger
+    triggerMode: TriggerMode;
+    triggerSelector: TriggerSelector;
+    triggerSource: TriggerSource;
+    // GigE Stream
+    transmissionType: TransmissionType;
+    gevDriver: GevDriver;
+    packetSizeBytes: number;   // GigE packet size
+    enableResend: boolean;
+    // Buffers
+    maxNumBuffer: number;
+}
+
+const DEFAULT_TL_CONFIG: TLConfig = {
+    heartbeatTimeout: 1000,
+    connectionGuardEnable: false,
+    readTimeout: 500,
+    writeTimeout: 500,
+    maxRetryCountRead: 2,
+    maxRetryCountWrite: 2,
+    migrationModeEnable: false,
+    enablePersistentIp: false,
+    enableDhcp: true,
+    persistentIp: '192.168.0.200',
+    persistentSubnet: '255.255.255.0',
+    persistentGateway: '192.168.0.1',
+};
+
+const DEFAULT_CONFIG: CameraConfig = {
+    connectionMode: 'auto',
+    serialNumber: '',
+    ipAddress: '',
+    timeout: 5000,
+    pixelFormat: 'Mono8',
+    width: 1920,
+    height: 1200,
+    offsetX: 0,
+    offsetY: 0,
+    acquisitionMode: 'Continuous',
+    acquisitionFrameRateEnable: true,
+    acquisitionFrameRateAbs: 48.0,
+    exposureAuto: 'Off',
+    exposureTimeAbs: 10000,
+    gainAuto: 'Off',
+    gainRaw: 0,
+    triggerMode: 'Off',
+    triggerSelector: 'FrameStart',
+    triggerSource: 'Software',
+    transmissionType: 'Unicast',
+    gevDriver: 'WindowsFilterDriver',
+    packetSizeBytes: 1500,
+    enableResend: true,
+    maxNumBuffer: 10,
+};
+
+export default function BaslerCamera() {
+    const [status, setStatus] = useState<ConnectionStatus>('disconnected');
+    const [devices, setDevices] = useState<BaslerDevice[]>([]);
+    const [selected, setSelected] = useState<BaslerDevice | null>(null);
+    const [config, setConfig] = useState<CameraConfig>(DEFAULT_CONFIG);
+    const [tlConfig, setTLConfig] = useState<TLConfig>(DEFAULT_TL_CONFIG);
+    const [scanProgress, setScanProgress] = useState(0);
+    const [errorMsg, setErrorMsg] = useState('');
+    const [activeTab, setActiveTab] = useState<'connection' | 'image' | 'acquisition' | 'trigger' | 'gige' | 'transport' | 'preview'>('connection');
+    const [logs, setLogs] = useState<{ time: string; level: 'info' | 'warn' | 'error' | 'success'; msg: string }[]>([]);
+    // Backend Python
+    const [backendOk, setBackendOk] = useState<boolean | null>(null); // null=checking
+    const [streamKey, setStreamKey] = useState(0);  // fuerza reload del img src
+    const [serverFps, setServerFps] = useState(0);
+    const [serverFrames, setServerFrames] = useState(0);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const animRef = useRef<number>(0);
+    const logsEndRef = useRef<HTMLDivElement>(null);
+
+    const BACKEND = 'http://localhost:8765';
+
+    const log = (level: 'info' | 'warn' | 'error' | 'success', msg: string) => {
+        const time = new Date().toLocaleTimeString('es-ES', { hour12: false });
+        setLogs(prev => [...prev.slice(-59), { time, level, msg }]);
+    };
+
+    useEffect(() => {
+        logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [logs]);
+
+    // ── Comprobar disponibilidad del backend Python al montar ──────────────────
+    useEffect(() => {
+        const checkBackend = async () => {
+            try {
+                const r = await fetch(`${BACKEND}/api/status`, { signal: AbortSignal.timeout(2000) });
+                if (r.ok) {
+                    setBackendOk(true);
+                    log('success', `✓ camera_server.py detectado en ${BACKEND}`);
+                } else {
+                    setBackendOk(false);
+                }
+            } catch {
+                setBackendOk(false);
+                log('warn', 'camera_server.py NO detectado — modo simulación activo');
+                log('info', 'Arranca con:  python camera_server.py');
+            }
+        };
+        checkBackend();
+    }, []);
+
+    // ── Poll FPS desde backend cuando conectado ──────────────────────────────
+    useEffect(() => {
+        if (status !== 'connected' || !backendOk) return;
+        const interval = setInterval(async () => {
+            try {
+                const r = await fetch(`${BACKEND}/api/status`);
+                const data = await r.json();
+                setServerFps(data.fps ?? 0);
+                setServerFrames(data.frame_count ?? 0);
+            } catch { /* ignore */ }
+        }, 1000);
+        return () => clearInterval(interval);
+    }, [status, backendOk]);
+
+    // ── Canvas simulado (fallback cuando SIN backend) ───────────────────────
+    useEffect(() => {
+        // Solo animar si NO hay backend o si el backend no está conectado
+        if (backendOk || status !== 'connected' || activeTab !== 'preview') {
+            cancelAnimationFrame(animRef.current);
+            return;
+        }
+        let t = 0;
+        let frames = 0;
+        const draw = () => {
+            const canvas = canvasRef.current;
+            if (!canvas) { animRef.current = requestAnimationFrame(draw); return; }
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            const W = 640, H = 400;
+            if (canvas.width !== W) canvas.width = W;
+            if (canvas.height !== H) canvas.height = H;
+            const imgData = ctx.createImageData(W, H);
+            const d = imgData.data;
+            for (let y = 0; y < H; y++) {
+                for (let x = 0; x < W; x++) {
+                    const i = (y * W + x) * 4;
+                    const dist = Math.hypot(x - W / 2, y - H / 2);
+                    const radial = Math.max(0, 1 - dist / (Math.min(W, H) * 0.44));
+                    const wave = Math.sin((x + t) * 0.022) * 20 + Math.cos((y + t * 0.7) * 0.022) * 14;
+                    const noise = (Math.random() - 0.5) * 12;
+                    const expFactor = Math.min(1, config.exposureTimeAbs / 50000);
+                    let v = 20 + expFactor * 160 * radial + wave + noise;
+                    v = Math.max(0, Math.min(255, v));
+                    d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+            ctx.strokeStyle = 'rgba(0,255,100,0.6)'; ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H);
+            ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2);
+            ctx.stroke();
+            ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(8, 8, 280, 96);
+            ctx.fillStyle = '#ffa500'; ctx.font = 'bold 11px monospace';
+            ctx.fillText(`● SIMULADO — Sin camera_server.py`, 14, 24);
+            ctx.fillStyle = '#cdd9e5'; ctx.font = '11px monospace';
+            ctx.fillText(`SN:40002788  ID:10726304`, 14, 40);
+            ctx.fillText(`IP: 192.168.0.200`, 14, 54);
+            ctx.fillText(`Format: ${config.pixelFormat}  AOI: ${config.width}×${config.height}`, 14, 68);
+            ctx.fillText(`Exp: ${config.exposureTimeAbs.toLocaleString()}µs  Gain: ${config.gainRaw}`, 14, 82);
+            ctx.fillText(`Frame#: ${frames}  (instala camera_server.py)`, 14, 96);
+            t += 0.35; frames++;
+            animRef.current = requestAnimationFrame(draw);
+        };
+        const timer = setTimeout(() => draw(), 80);
+        return () => { clearTimeout(timer); cancelAnimationFrame(animRef.current); };
+    }, [backendOk, status, activeTab, config]);
+
+    // ── Escaneo ─────────────────────────────────────────────────────────────────
+    const handleScan = async () => {
+        setStatus('scanning'); setDevices([]); setSelected(null);
+        setErrorMsg(''); setScanProgress(10);
+        log('info', 'Iniciando TlFactory.GetInstance()...');
+        log('info', 'Enumerando interfaces GigE Vision...');
+
+        if (backendOk) {
+            // ── Escaneo REAL via camera_server.py ────────────────────────────
+            try {
+                setScanProgress(40);
+                const r = await fetch(`${BACKEND}/api/devices`);
+                const data = await r.json();
+                setScanProgress(100);
+                const devs: BaslerDevice[] = data.devices ?? [];
+                setDevices(devs);
+                if (devs.length > 0) {
+                    const realTag = data.pylon ? '✔ pylon real' : '⚠ pypylon no instalado';
+                    log('success', `${devs.length} dispositivo(s) encontrado(s) [${realTag}]:`);
+                    devs.forEach(d => log('info',
+                        `  [${d.deviceType}] ${d.modelName} | SN:${d.serialNumber} | IP:${d.ipAddress} | FW:${d.firmwareVersion}`
+                    ));
+                } else {
+                    log('warn', 'No se encontraron cámaras Basler.');
+                    log('info', '→ Comprueba que el cable Ethernet esté conectado.');
+                    log('info', '→ Verifica que la IP de la NIC está en el rango 192.168.0.x');
+                }
+            } catch (e) {
+                setScanProgress(0);
+                log('error', `Error en escaneo: ${e}`);
+                setErrorMsg('No se pudo contactar con camera_server.py');
+            }
+        } else {
+            // ── Sin backend: no hay forma de detectar hardware real ──────────────
+            for (let p = 10; p <= 90; p += 20) {
+                await new Promise(r => setTimeout(r, 120));
+                setScanProgress(p);
+            }
+            setScanProgress(100);
+            // No añadimos ningún dispositivo — lista vacía
+            setDevices([]);
+            log('warn', 'camera_server.py no está ejecutándose.');
+            log('info', '│  Para detectar la cámara real, abre una terminal y ejecuta:');
+            log('info', '│  > python camera_server.py');
+            log('info', '│  Luego instala dependencias si es necesario:');
+            log('info', '└  > pip install pypylon opencv-python');
+            setErrorMsg('Inicia camera_server.py para detectar cámaras reales');
+        }
+        setStatus('disconnected');
+    };
+
+    // ── Conexión ─────────────────────────────────────────────────────────────────
+    const handleConnect = async () => {
+        setStatus('connecting'); setErrorMsg('');
+        const cam = selected ?? (devices[0] ?? null);
+        log('info', '═════════════════════════════════════════');
+        log('info', 'Creando BaslerCamera (CDeviceSpecificInstantCamera)...');
+        if (config.connectionMode === 'serial' && config.serialNumber)
+            log('info', `TlFactory::CreateFirstDevice() → SerialNumber="${config.serialNumber}"`);
+        else if (config.connectionMode === 'ip' && config.ipAddress)
+            log('info', `TlFactory::CreateFirstDevice() → IpAddress="${config.ipAddress}"`);
+        else
+            log('info', 'TlFactory::CreateFirstDevice() → auto');
+
+        if (backendOk) {
+            // ── Conexión REAL via camera_server.py ──────────────────────────────
+            try {
+                log('info', `Llamando a ${BACKEND}/api/connect...`);
+                const r = await fetch(`${BACKEND}/api/connect`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        connectionMode: config.connectionMode,
+                        serialNumber: config.serialNumber || cam?.serialNumber,
+                        ipAddress: config.ipAddress || cam?.ipAddress || '192.168.0.200',
+                        pixelFormat: config.pixelFormat,
+                        width: config.width,
+                        height: config.height,
+                        offsetX: config.offsetX,
+                        offsetY: config.offsetY,
+                        exposureAuto: config.exposureAuto,
+                        exposureTimeAbs: config.exposureTimeAbs,
+                        gainAuto: config.gainAuto,
+                        gainRaw: config.gainRaw,
+                        acquisitionMode: config.acquisitionMode,
+                        acquisitionFrameRateEnable: config.acquisitionFrameRateEnable,
+                        acquisitionFrameRateAbs: config.acquisitionFrameRateAbs,
+                        triggerMode: config.triggerMode,
+                        triggerSelector: config.triggerSelector,
+                        triggerSource: config.triggerSource,
+                    }),
+                });
+                const data = await r.json();
+                if (data.ok) {
+                    const simTag = data.simulated ? ' (SIMULADO — pypylon no instalado)' : ' (REAL ✔)';
+                    log('success', `✓ Cámara conectada${simTag}`);
+                    log('success', `✓ Stream MJPEG activo en ${BACKEND}/api/stream`);
+                    setStatus('connected');
+                    if (cam) setSelected({ ...cam, status: 'connected' });
+                    setStreamKey(k => k + 1);  // fuerza reload del img
+                    setActiveTab('preview');
+                } else {
+                    log('error', `Error al conectar: ${data.error}`);
+                    setErrorMsg(data.error ?? 'Error de conexión');
+                    setStatus('error');
+                }
+            } catch (e) {
+                log('error', `Excepción: ${e}`);
+                setErrorMsg(`No se pudo contactar con camera_server.py`);
+                setStatus('error');
+            }
+        } else {
+            // ── Conexión SIMULADA (sin backend) ────────────────────────────────
+            log('warn', 'backend NO disponible — modo simulación');
+            log('info', 'Arranca camera_server.py para imagen real');
+            await new Promise(r => setTimeout(r, 600));
+            log('info', `PixelFormat = ${config.pixelFormat}  ${config.width}×${config.height}`);
+            log('info', `Exp: ${config.exposureTimeAbs}µs  Gain: ${config.gainRaw}`);
+            log('info', 'StartGrabbing(GrabStrategy_LatestImageOnly)...');
+            await new Promise(r => setTimeout(r, 300));
+            log('success', '✓ Cámara simulada activa.');
+            setStatus('connected');
+            if (cam) setSelected({ ...cam, status: 'connected' });
+            setActiveTab('preview');
+        }
+    };
+
+    // ── Desconexión ──────────────────────────────────────────────────────────────
+    const handleDisconnect = async () => {
+        cancelAnimationFrame(animRef.current);
+        log('warn', 'StopGrabbing()...');
+        if (backendOk) {
+            try {
+                await fetch(`${BACKEND}/api/disconnect`, { method: 'POST' });
+                log('info', 'BaslerCamera.Close() via camera_server.py');
+            } catch { /* ignore */ }
+        }
+        log('success', 'Cámara desconectada correctamente.');
+        setStatus('disconnected');
+        if (selected) setSelected({ ...selected, status: 'available' });
+        setActiveTab('connection');
+        setServerFps(0);
+        setServerFrames(0);
+    };
+
+    const set = <K extends keyof CameraConfig>(key: K, value: CameraConfig[K]) =>
+        setConfig(prev => ({ ...prev, [key]: value }));
+    const setTL = <K extends keyof TLConfig>(key: K, value: TLConfig[K]) =>
+        setTLConfig(prev => ({ ...prev, [key]: value }));
+
+    const getStatusColor = () => {
+        if (status === 'connected') return '#00ff64';
+        if (status === 'connecting' || status === 'scanning') return '#ffa500';
+        if (status === 'error') return '#ff4444';
+        return '#8b949e';
+    };
+
+    const logColor = (level: string) => {
+        if (level === 'success') return '#00ff64';
+        if (level === 'warn') return '#ffa500';
+        if (level === 'error') return '#ff4444';
+        return '#8b949e';
+    };
+
+    const isConnected = status === 'connected';
+    const isBusy = status === 'scanning' || status === 'connecting';
+
+    const tabs: { id: typeof activeTab; label: string }[] = [
+        { id: 'connection', label: '🔌 Conexión' },
+        { id: 'image', label: '🖼 Imagen' },
+        { id: 'acquisition', label: '⏱ Adquisición' },
+        { id: 'trigger', label: '⚡ Trigger' },
+        { id: 'gige', label: '🌐 GigE' },
+        { id: 'transport', label: '🔗 Transport Layer' },
+        { id: 'preview', label: '📷 Live Preview' },
+    ];
+
+    return (
+        <div className="basler-page">
+
+            {/* ── HEADER ── */}
+            <div className="basler-header">
+                <div className="basler-logo-badge">
+                    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                        <circle cx="14" cy="14" r="12" stroke="#00ff64" strokeWidth="1.8" />
+                        <circle cx="14" cy="14" r="6" stroke="#00ff64" strokeWidth="1.2" />
+                        <circle cx="14" cy="14" r="2" fill="#00ff64" />
+                        {[0, 90, 180, 270].map(a => {
+                            const r = a * Math.PI / 180;
+                            return <line key={a} x1={14 + 8 * Math.cos(r)} y1={14 + 8 * Math.sin(r)} x2={14 + 12 * Math.cos(r)} y2={14 + 12 * Math.sin(r)} stroke="#00ff64" strokeWidth="1.5" />;
+                        })}
+                    </svg>
+                    <div>
+                        <div className="basler-title">Basler Camera · acA1920-48gm</div>
+                        <div className="basler-subtitle">pylon SDK 7.x · GigE Vision · Mono · 1920×1200 · 48fps</div>
+                    </div>
+                </div>
+                <div className="basler-status-badge" style={{ color: getStatusColor(), borderColor: getStatusColor() }}>
+                    {status === 'connected' ? '● GRABBING' : status === 'scanning' ? '◌ SCANNING' : status === 'connecting' ? '◌ OPENING' : status === 'error' ? '✖ ERROR' : '○ CLOSED'}
+                </div>
+            </div>
+
+            {/* ── TABS ── */}
+            <div className="basler-tabs">
+                {tabs.map(t => (
+                    <button
+                        key={t.id}
+                        className={`basler-tab ${activeTab === t.id ? 'active' : ''} ${t.id === 'preview' && !isConnected ? 'disabled' : ''}`}
+                        onClick={() => { if (t.id !== 'preview' || isConnected) setActiveTab(t.id); }}
+                    >{t.label}</button>
+                ))}
+            </div>
+
+            <div className="basler-body">
+
+                {/* ══ TAB: CONEXIÓN ══════════════════════════════════════════════════════ */}
+                {activeTab === 'connection' && (
+                    <div className="basler-section-grid">
+
+                        {/* Dispositivos detectados */}
+                        <div className="basler-panel">
+                            <div className="basler-panel-header">
+                                <span>Dispositivos GigE Vision</span>
+                                <button className={`basler-btn scan ${status === 'scanning' ? 'loading' : ''}`} onClick={handleScan} disabled={isBusy || isConnected}>
+                                    {status === 'scanning' ? <><span className="spin">↻</span>Escaneando…</> : '🔍 Escanear'}</button>
+                            </div>
+
+                            {status === 'scanning' && (
+                                <div className="basler-progress">
+                                    <div className="basler-progress-bar" style={{ width: `${scanProgress}%` }} />
+                                    <span>{scanProgress}%</span>
+                                </div>
+                            )}
+
+                            {devices.length === 0 ? (
+                                <div className="basler-empty-state">
+                                    <div className="basler-empty-icon">
+                                        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                                            <circle cx="24" cy="24" r="20" stroke="#30363d" strokeWidth="2" />
+                                            <circle cx="24" cy="24" r="9" stroke="#30363d" strokeWidth="1.5" strokeDasharray="4 3" />
+                                            <circle cx="24" cy="24" r="3" fill="#30363d" />
+                                        </svg>
+                                    </div>
+                                    <p>Sin cámaras detectadas</p>
+                                    <span>Haz clic en <b>Escanear</b> para enumerar dispositivos Basler en la red GigE</span>
+                                </div>
+                            ) : (
+                                <div className="basler-device-list">
+                                    {devices.map(dev => (
+                                        <div key={dev.index} className={`basler-device-card ${selected?.index === dev.index ? 'selected' : ''}`}
+                                            onClick={() => { setSelected(dev); set('serialNumber', dev.serialNumber); set('ipAddress', dev.ipAddress); }}>
+                                            <div className="device-card-left">
+                                                <div className="device-type-badge GigE">GigE</div>
+                                                <div>
+                                                    <div className="device-model">{dev.modelName}</div>
+                                                    <div className="device-serial">SN: {dev.serialNumber} · FW: {dev.firmwareVersion}</div>
+                                                    <div className="device-ip">IP: {dev.ipAddress} · {dev.subnetMask}</div>
+                                                    <div className="device-mac">MAC: {dev.macAddress}</div>
+                                                </div>
+                                            </div>
+                                            <div className={`device-status-dot ${dev.status}`} />
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Modo de conexión + botón */}
+                        <div className="basler-panel">
+                            <div className="basler-panel-header"><span>Modo de Conexión</span></div>
+
+                            <div className="basler-mode-selector">
+                                {(['auto', 'serial', 'ip'] as ConnectionMode[]).map(m => (
+                                    <button key={m} className={`mode-btn ${config.connectionMode === m ? 'active' : ''}`} onClick={() => set('connectionMode', m)}>
+                                        {m === 'auto' ? '⚡ Auto' : m === 'serial' ? '🔢 Serial' : '🌐 IP'}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {config.connectionMode === 'serial' && (
+                                <div className="basler-form-group">
+                                    <label>Número de Serie</label>
+                                    <input className="basler-input" placeholder="Ej: 40002788" value={config.serialNumber}
+                                        onChange={e => set('serialNumber', e.target.value)} />
+                                    <span className="basler-hint">DeviceInfo.SetSerialNumber()</span>
+                                </div>
+                            )}
+                            {config.connectionMode === 'ip' && (
+                                <div className="basler-form-group">
+                                    <label>IP Address (GigE)</label>
+                                    <input className="basler-input" placeholder="Ej: 192.168.1.101" value={config.ipAddress}
+                                        onChange={e => set('ipAddress', e.target.value)} />
+                                    <span className="basler-hint">DeviceInfo.SetIpAddress() → SetPersistentIpAddress()</span>
+                                </div>
+                            )}
+                            {config.connectionMode === 'auto' && (
+                                <div className="basler-info-box">
+                                    <strong>TlFactory::CreateFirstDevice()</strong>
+                                    <p>Conecta al primer dispositivo Basler disponible. Usa modo Serial o IP para selección explícita cuando haya múltiples cámaras.</p>
+                                </div>
+                            )}
+
+                            <div className="basler-form-group">
+                                <label>Timeout (ms)</label>
+                                <input className="basler-input" type="number" min={1000} max={30000} step={500}
+                                    value={config.timeout} onChange={e => set('timeout', Number(e.target.value))} />
+                            </div>
+
+                            {errorMsg && <div className="basler-error-msg">⚠️ {errorMsg}</div>}
+
+                            {selected && (
+                                <div className="basler-selected-summary">
+                                    <span>Seleccionado:</span>
+                                    <strong>{selected.modelName}</strong>
+                                    <div className="device-type-badge GigE">GigE</div>
+                                </div>
+                            )}
+
+                            <div className="basler-connect-actions">
+                                {!isConnected ? (
+                                    <button className="basler-btn connect" onClick={handleConnect} disabled={isBusy}>
+                                        {status === 'connecting' ? <><span className="spin">↻</span>Abriendo…</> : '⚡ Conectar Cámara'}
+                                    </button>
+                                ) : (
+                                    <button className="basler-btn disconnect" onClick={handleDisconnect}>⏹ StopGrabbing / Close</button>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* ══ TAB: IMAGEN ════════════════════════════════════════════════════════ */}
+                {activeTab === 'image' && (
+                    <div className="basler-section-grid basler-config-grid">
+                        <div className="basler-panel">
+                            <div className="basler-panel-header"><span>PixelFormat / AOI</span></div>
+                            <div className="basler-config-form">
+                                <div className="basler-form-group">
+                                    <label>Pixel Format</label>
+                                    <select className="basler-input" value={config.pixelFormat} onChange={e => set('pixelFormat', e.target.value as PixelFormat)}>
+                                        <option value="Mono8">Mono8 — 8 bits/pixel</option>
+                                        <option value="Mono10">Mono10 — 10 bits/pixel</option>
+                                        <option value="Mono10p">Mono10p — 10 bits packed</option>
+                                    </select>
+                                    <span className="basler-hint">acA1920-48gm: solo monocromo (gm). Sin Bayer.</span>
+                                </div>
+                                <div className="config-row">
+                                    <div className="basler-form-group">
+                                        <label>Width (px) — máx 1920</label>
+                                        <input className="basler-input" type="number" min={16} max={1920} step={16}
+                                            value={config.width} onChange={e => set('width', Number(e.target.value))} />
+                                    </div>
+                                    <div className="basler-form-group">
+                                        <label>Height (px) — máx 1200</label>
+                                        <input className="basler-input" type="number" min={16} max={1200} step={2}
+                                            value={config.height} onChange={e => set('height', Number(e.target.value))} />
+                                    </div>
+                                </div>
+                                <div className="config-row">
+                                    <div className="basler-form-group">
+                                        <label>OffsetX</label>
+                                        <input className="basler-input" type="number" min={0} max={1904} step={16}
+                                            value={config.offsetX} onChange={e => set('offsetX', Number(e.target.value))} />
+                                    </div>
+                                    <div className="basler-form-group">
+                                        <label>OffsetY</label>
+                                        <input className="basler-input" type="number" min={0} max={1184} step={2}
+                                            value={config.offsetY} onChange={e => set('offsetY', Number(e.target.value))} />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="basler-panel">
+                            <div className="basler-panel-header"><span>Exposición y Ganancia</span></div>
+                            <div className="basler-config-form">
+                                <div className="basler-form-group">
+                                    <label>ExposureAuto</label>
+                                    <select className="basler-input" value={config.exposureAuto} onChange={e => set('exposureAuto', e.target.value as ExposureAuto)}>
+                                        <option value="Off">Off — tiempo fijo</option>
+                                        <option value="Once">Once — ajuste único</option>
+                                        <option value="Continuous">Continuous — ajuste continuo</option>
+                                    </select>
+                                </div>
+                                {config.exposureAuto === 'Off' && (
+                                    <div className="basler-form-group">
+                                        <label>ExposureTimeAbs (µs): <strong>{config.exposureTimeAbs.toLocaleString()} µs</strong></label>
+                                        <input type="range" className="basler-slider" min={38} max={1000000} step={100}
+                                            value={config.exposureTimeAbs} onChange={e => set('exposureTimeAbs', Number(e.target.value))} />
+                                        <div className="slider-labels"><span>38 µs</span><span>1 000 000 µs</span></div>
+                                    </div>
+                                )}
+                                <div className="basler-form-group">
+                                    <label>GainAuto</label>
+                                    <select className="basler-input" value={config.gainAuto} onChange={e => set('gainAuto', e.target.value as GainAuto)}>
+                                        <option value="Off">Off — ganancia fija</option>
+                                        <option value="Once">Once</option>
+                                        <option value="Continuous">Continuous</option>
+                                    </select>
+                                </div>
+                                {config.gainAuto === 'Off' && (
+                                    <div className="basler-form-group">
+                                        <label>GainRaw: <strong>{config.gainRaw}</strong></label>
+                                        <input type="range" className="basler-slider" min={0} max={500} step={1}
+                                            value={config.gainRaw} onChange={e => set('gainRaw', Number(e.target.value))} />
+                                        <div className="slider-labels"><span>0</span><span>500 (raw)</span></div>
+                                        <span className="basler-hint">GainSelector = All (único canal en cámara gm)</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* ══ TAB: ADQUISICIÓN ══════════════════════════════════════════════════ */}
+                {activeTab === 'acquisition' && (
+                    <div className="basler-panel" style={{ maxWidth: 600 }}>
+                        <div className="basler-panel-header"><span>Adquisición</span></div>
+                        <div className="basler-config-form">
+                            <div className="basler-form-group">
+                                <label>AcquisitionMode</label>
+                                <select className="basler-input" value={config.acquisitionMode} onChange={e => set('acquisitionMode', e.target.value as AcquisitionMode)}>
+                                    <option value="Continuous">Continuous — grabación continua</option>
+                                    <option value="SingleFrame">SingleFrame — un frame por disparo</option>
+                                </select>
+                            </div>
+                            <div className="basler-form-group">
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                    <input type="checkbox" checked={config.acquisitionFrameRateEnable}
+                                        onChange={e => set('acquisitionFrameRateEnable', e.target.checked)} />
+                                    AcquisitionFrameRateEnable
+                                </label>
+                                <span className="basler-hint">Habilita el control de frame rate. Sin esto la cámara va al máximo posible según exposición.</span>
+                            </div>
+                            {config.acquisitionFrameRateEnable && (
+                                <div className="basler-form-group">
+                                    <label>AcquisitionFrameRateAbs (fps): <strong>{config.acquisitionFrameRateAbs.toFixed(1)} fps</strong></label>
+                                    <input type="range" className="basler-slider" min={1} max={48} step={0.5}
+                                        value={config.acquisitionFrameRateAbs} onChange={e => set('acquisitionFrameRateAbs', Number(e.target.value))} />
+                                    <div className="slider-labels"><span>1 fps</span><span>48 fps (máx acA1920-48gm)</span></div>
+                                </div>
+                            )}
+                            <div className="basler-form-group">
+                                <label>MaxNumBuffer (stream grabber)</label>
+                                <input className="basler-input" type="number" min={1} max={64}
+                                    value={config.maxNumBuffer} onChange={e => set('maxNumBuffer', Number(e.target.value))} />
+                                <span className="basler-hint">Número de buffers de imagen en el pipeline. Mínimo 1, recomendado ≥5.</span>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* ══ TAB: TRIGGER ══════════════════════════════════════════════════════ */}
+                {activeTab === 'trigger' && (
+                    <div className="basler-panel" style={{ maxWidth: 600 }}>
+                        <div className="basler-panel-header"><span>Trigger</span></div>
+                        <div className="basler-config-form">
+                            <div className="basler-form-group">
+                                <label>TriggerMode</label>
+                                <select className="basler-input" value={config.triggerMode} onChange={e => set('triggerMode', e.target.value as TriggerMode)}>
+                                    <option value="Off">Off — Free-running (sin trigger externo)</option>
+                                    <option value="On">On — Trigger activado</option>
+                                </select>
+                            </div>
+                            {config.triggerMode === 'On' && (
+                                <>
+                                    <div className="basler-form-group">
+                                        <label>TriggerSelector</label>
+                                        <select className="basler-input" value={config.triggerSelector} onChange={e => set('triggerSelector', e.target.value as TriggerSelector)}>
+                                            <option value="FrameStart">FrameStart</option>
+                                            <option value="AcquisitionStart">AcquisitionStart</option>
+                                        </select>
+                                    </div>
+                                    <div className="basler-form-group">
+                                        <label>TriggerSource</label>
+                                        <select className="basler-input" value={config.triggerSource} onChange={e => set('triggerSource', e.target.value as TriggerSource)}>
+                                            <option value="Software">Software — WaitForFrameTriggerReady / ExecuteSoftwareTrigger</option>
+                                            <option value="Line1">Line1 — señal TTL/OptoCoupled entrada</option>
+                                            <option value="Line3">Line3 — señal LVDS/RS422 entrada</option>
+                                            <option value="Action1">Action1 — GigE Action Command</option>
+                                        </select>
+                                    </div>
+                                    <div className="basler-info-box">
+                                        <strong>Activación: RisingEdge</strong>
+                                        <p>La cámara acA1920-48gm soporta TriggerActivation = RisingEdge y FallingEdge. Configurable en pylon Viewer o via SDK.</p>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                {/* ══ TAB: GigE ═════════════════════════════════════════════════════════ */}
+                {activeTab === 'gige' && (
+                    <div className="basler-section-grid basler-config-grid">
+                        <div className="basler-panel">
+                            <div className="basler-panel-header"><span>Stream GigE</span></div>
+                            <div className="basler-config-form">
+                                <div className="basler-form-group">
+                                    <label>TransmissionType</label>
+                                    <select className="basler-input" value={config.transmissionType} onChange={e => set('transmissionType', e.target.value as TransmissionType)}>
+                                        <option value="Unicast">Unicast — un receptor (recomendado)</option>
+                                        <option value="Multicast">Multicast — múltiples receptores en grupo</option>
+                                        <option value="LimitedBroadcast">LimitedBroadcast — toda la LAN</option>
+                                        <option value="SubnetDirectedBroadcast">SubnetDirectedBroadcast — toda la subred</option>
+                                    </select>
+                                </div>
+                                <div className="basler-form-group">
+                                    <label>Driver GigE</label>
+                                    <select className="basler-input" value={config.gevDriver} onChange={e => set('gevDriver', e.target.value as GevDriver)}>
+                                        <option value="WindowsFilterDriver">Windows Filter Driver (pylon GigE Vision)</option>
+                                        <option value="SocketDriver">Socket Driver (genérico)</option>
+                                    </select>
+                                    <span className="basler-hint">Filter Driver ofrece mejor rendimiento y menor latencia en Windows.</span>
+                                </div>
+                                <div className="basler-form-group">
+                                    <label>Packet Size (bytes): <strong>{config.packetSizeBytes}</strong></label>
+                                    <input type="range" className="basler-slider" min={576} max={9000} step={4}
+                                        value={config.packetSizeBytes} onChange={e => set('packetSizeBytes', Number(e.target.value))} />
+                                    <div className="slider-labels"><span>576</span><span>9000 (Jumbo)</span></div>
+                                    <span className="basler-hint">1500 para redes estándar. 9000 (Jumbo Frames) requiere soporte en switch y NIC.</span>
+                                </div>
+                                <div className="basler-form-group">
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                        <input type="checkbox" checked={config.enableResend} onChange={e => set('enableResend', e.target.checked)} />
+                                        EnableResend — reenvío de paquetes perdidos
+                                    </label>
+                                    <span className="basler-hint">Recomendado en redes con pérdida de paquetes. Puede añadir latencia.</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="basler-panel">
+                            <div className="basler-panel-header"><span>Código pypylon generado</span></div>
+                            <div className="basler-code-preview" style={{ flex: 1 }}>
+                                <div className="code-preview-header">⌨ Python / pypylon — acA1920-48gm</div>
+                                <pre className="code-preview-content">{`from pypylon import pylon
+
+# ─ Enumerar dispositivos ────────────────────────────
+tlFactory = pylon.TlFactory.GetInstance()
+devices = tlFactory.EnumerateDevices()
+if not devices:
+    raise RuntimeError("No Basler cameras found")
+
+# ─ Crear InstantCamera ──────────────────────────────
+${config.connectionMode === 'serial' && config.serialNumber
+                                        ? `di = pylon.DeviceInfo()
+di.SetSerialNumber("${config.serialNumber}")
+camera = pylon.InstantCamera(tlFactory.CreateFirstDevice(di))`
+                                        : config.connectionMode === 'ip' && config.ipAddress
+                                            ? `di = pylon.DeviceInfo()
+di.SetIpAddress("${config.ipAddress}")
+camera = pylon.InstantCamera(tlFactory.CreateFirstDevice(di))`
+                                            : `camera = pylon.InstantCamera(
+    tlFactory.CreateFirstDevice())`}
+
+camera.Open()
+
+# ─ Imagen ───────────────────────────────────────────
+camera.PixelFormat.Value       = "${config.pixelFormat}"
+camera.Width.Value             = ${config.width}
+camera.Height.Value            = ${config.height}
+camera.OffsetX.Value           = ${config.offsetX}
+camera.OffsetY.Value           = ${config.offsetY}
+
+# ─ Exposición / Ganancia ────────────────────────────
+camera.ExposureAuto.Value      = "${config.exposureAuto}"${config.exposureAuto === 'Off' ? `
+camera.ExposureTimeAbs.Value   = ${config.exposureTimeAbs}  # µs` : ''}
+camera.GainAuto.Value          = "${config.gainAuto}"${config.gainAuto === 'Off' ? `
+camera.GainRaw.Value           = ${config.gainRaw}` : ''}
+
+# ─ Adquisición ──────────────────────────────────────
+camera.AcquisitionMode.Value   = "${config.acquisitionMode}"
+camera.AcquisitionFrameRateEnable.Value = ${config.acquisitionFrameRateEnable}${config.acquisitionFrameRateEnable ? `
+camera.AcquisitionFrameRateAbs.Value = ${config.acquisitionFrameRateAbs}` : ''}
+
+# ─ Trigger ──────────────────────────────────────────
+camera.TriggerMode.Value       = "${config.triggerMode}"${config.triggerMode === 'On' ? `
+camera.TriggerSelector.Value   = "${config.triggerSelector}"
+camera.TriggerSource.Value     = "${config.triggerSource}"` : ''}
+
+# ─ Grab ─────────────────────────────────────────────
+camera.StartGrabbing(
+    pylon.GrabStrategy_LatestImageOnly)
+
+converter = pylon.ImageFormatConverter()
+converter.OutputPixelFormat = \\
+    pylon.PixelType_BGR8packed
+
+while camera.IsGrabbing():
+    gr = camera.RetrieveResult(
+        5000, pylon.TimeoutHandling_ThrowException)
+    if gr.GrabSucceeded():
+        img = converter.Convert(gr)
+        arr = img.GetArray()  # numpy array
+    gr.Release()
+`}</pre>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* ══ TAB: TRANSPORT LAYER ═══════════════════════════════════════════════ */}
+                {activeTab === 'transport' && (
+                    <div className="basler-section-grid basler-config-grid">
+                        <div className="basler-panel">
+                            <div className="basler-panel-header"><span>BaslerCameraTLParams — GigE Transport</span></div>
+                            <div className="basler-config-form">
+                                <div className="basler-form-group">
+                                    <label>HeartbeatTimeout (ms): <strong>{tlConfig.heartbeatTimeout} ms</strong></label>
+                                    <input type="range" className="basler-slider" min={100} max={10000} step={100}
+                                        value={tlConfig.heartbeatTimeout} onChange={e => setTL('heartbeatTimeout', Number(e.target.value))} />
+                                    <div className="slider-labels"><span>100 ms</span><span>10 000 ms</span></div>
+                                    <span className="basler-hint">Timeout de heartbeat GigE (lado host). Si la cámara no recibe heartbeat en este tiempo, libera el canal de control.</span>
+                                </div>
+                                <div className="config-row">
+                                    <div className="basler-form-group">
+                                        <label>ReadTimeout (ms)</label>
+                                        <input className="basler-input" type="number" min={50} max={5000} step={50}
+                                            value={tlConfig.readTimeout} onChange={e => setTL('readTimeout', Number(e.target.value))} />
+                                    </div>
+                                    <div className="basler-form-group">
+                                        <label>WriteTimeout (ms)</label>
+                                        <input className="basler-input" type="number" min={50} max={5000} step={50}
+                                            value={tlConfig.writeTimeout} onChange={e => setTL('writeTimeout', Number(e.target.value))} />
+                                    </div>
+                                </div>
+                                <div className="config-row">
+                                    <div className="basler-form-group">
+                                        <label>MaxRetryCountRead</label>
+                                        <input className="basler-input" type="number" min={0} max={10}
+                                            value={tlConfig.maxRetryCountRead} onChange={e => setTL('maxRetryCountRead', Number(e.target.value))} />
+                                    </div>
+                                    <div className="basler-form-group">
+                                        <label>MaxRetryCountWrite</label>
+                                        <input className="basler-input" type="number" min={0} max={10}
+                                            value={tlConfig.maxRetryCountWrite} onChange={e => setTL('maxRetryCountWrite', Number(e.target.value))} />
+                                    </div>
+                                </div>
+                                <div className="basler-form-group">
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                        <input type="checkbox" checked={tlConfig.connectionGuardEnable}
+                                            onChange={e => setTL('connectionGuardEnable', e.target.checked)} />
+                                        ConnectionGuardEnable — PylonGigEConnectionGuard
+                                    </label>
+                                    <span className="basler-hint">Activa el guardián de conexión que restaura automáticamente la conexión GigE si se pierde.</span>
+                                </div>
+                                <div className="basler-form-group">
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                        <input type="checkbox" checked={tlConfig.migrationModeEnable}
+                                            onChange={e => setTL('migrationModeEnable', e.target.checked)} />
+                                        MigrationModeEnable — mapeo SFNC 1.x → 2.x
+                                    </label>
+                                    <span className="basler-hint">Necesario solo si se usan nombres de nodos de pylon &lt; v5. Mantener desactivado en instalaciones nuevas.</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="basler-panel">
+                            <div className="basler-panel-header"><span>IP Persistente — ChangeIpConfiguration / SetPersistentIpAddress</span></div>
+                            <div className="basler-config-form">
+                                <div className="basler-info-box">
+                                    <strong>BaslerCamera::ChangeIpConfiguration(EnablePersistentIp, EnableDhcp)</strong>
+                                    <p>Cambia la configuración de IP del dispositivo GigE. Requiere que la cámara esté abierta (<code>BaslerCamera.Open()</code>).</p>
+                                </div>
+                                <div className="basler-form-group">
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                        <input type="checkbox" checked={tlConfig.enablePersistentIp}
+                                            onChange={e => setTL('enablePersistentIp', e.target.checked)} />
+                                        EnablePersistentIp — IP fija en la cámara
+                                    </label>
+                                </div>
+                                <div className="basler-form-group">
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                        <input type="checkbox" checked={tlConfig.enableDhcp}
+                                            onChange={e => setTL('enableDhcp', e.target.checked)} />
+                                        EnableDhcp — DHCP
+                                    </label>
+                                </div>
+                                {tlConfig.enablePersistentIp && (
+                                    <>
+                                        <div className="basler-form-group">
+                                            <label>IP Persistente (SetPersistentIpAddress)</label>
+                                            <input className="basler-input" placeholder="Ej: 192.168.1.101"
+                                                value={tlConfig.persistentIp} onChange={e => setTL('persistentIp', e.target.value)} />
+                                        </div>
+                                        <div className="basler-form-group">
+                                            <label>Subnet Mask</label>
+                                            <input className="basler-input" placeholder="255.255.255.0"
+                                                value={tlConfig.persistentSubnet} onChange={e => setTL('persistentSubnet', e.target.value)} />
+                                        </div>
+                                        <div className="basler-form-group">
+                                            <label>Default Gateway</label>
+                                            <input className="basler-input" placeholder="192.168.1.1"
+                                                value={tlConfig.persistentGateway} onChange={e => setTL('persistentGateway', e.target.value)} />
+                                        </div>
+                                    </>
+                                )}
+                                <div className="basler-code-preview" style={{ marginTop: 12 }}>
+                                    <div className="code-preview-header">⌨ C++ / pypylon — Transport Layer</div>
+                                    <pre className="code-preview-content">{`# Transport Layer (TL) parameters
+cam = BaslerCamera()  # C++ custom class wrapping InstantCamera
+
+# TL node map accessible via GetTLNodeMap()
+tl = camera.GetTLNodeMap()
+tl["HeartbeatTimeout"].Value     = ${tlConfig.heartbeatTimeout}
+tl["ReadTimeout"].Value          = ${tlConfig.readTimeout}
+tl["WriteTimeout"].Value         = ${tlConfig.writeTimeout}
+tl["MaxRetryCountRead"].Value    = ${tlConfig.maxRetryCountRead}
+tl["MaxRetryCountWrite"].Value   = ${tlConfig.maxRetryCountWrite}
+tl["ConnectionGuardEnable"].Value = ${tlConfig.connectionGuardEnable}
+${tlConfig.enablePersistentIp ? `
+# C++ GigE IP configuration
+# cam.ChangeIpConfiguration(true, ${tlConfig.enableDhcp})
+# cam.SetPersistentIpAddress(
+#   "${tlConfig.persistentIp || '192.168.0.200'}",
+#   "${tlConfig.persistentSubnet}",
+#   "${tlConfig.persistentGateway}")
+` : ''}`}</pre>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* ══ TAB: PREVIEW ══════════════════════════════════════════════════════ */}
+                {activeTab === 'preview' && (
+                    <div className="basler-preview-section">
+                        <div className="basler-preview-header">
+                            <div className="preview-info">
+                                <span className="preview-live-dot" />
+                                <strong>{backendOk ? 'REAL ✔' : 'SIMULADO'}</strong>
+                                <span>{selected?.modelName} · {config.pixelFormat} · {config.width}×{config.height}</span>
+                                {backendOk && (
+                                    <span style={{ color: '#00ff64', fontFamily: 'monospace', fontSize: '0.8rem' }}>
+                                        {serverFps > 0 ? `${serverFps} fps · frame #${serverFrames}` : 'Conectando stream...'}
+                                    </span>
+                                )}
+                            </div>
+                            <button className="basler-btn disconnect small" onClick={handleDisconnect}>⏹ StopGrabbing</button>
+                        </div>
+
+                        {/* MJPEG real desde camera_server.py */}
+                        {backendOk ? (
+                            <img
+                                key={streamKey}
+                                src={`http://localhost:8765/api/stream?t=${streamKey}`}
+                                alt="Basler MJPEG Stream"
+                                className="basler-preview-canvas"
+                                style={{ background: '#000', border: '2px solid #00ff6440' }}
+                                onError={() => log('error', 'Error cargando stream MJPEG — ¿está camera_server.py en ejecución?')}
+                            />
+                        ) : (
+                            /* Canvas simulado — sin backend */
+                            <canvas ref={canvasRef} width={640} height={400} className="basler-preview-canvas" />
+                        )}
+
+                        <div className="preview-metrics">
+                            <div className="metric-chip">{backendOk ? '✔ camera_server.py' : '⚠ Simulado'}</div>
+                            <div className="metric-chip">{config.pixelFormat}</div>
+                            <div className="metric-chip">Exp: {config.exposureTimeAbs.toLocaleString()} µs</div>
+                            <div className="metric-chip">Gain: {config.gainRaw} raw</div>
+                            <div className="metric-chip">{backendOk ? `${serverFps} fps` : `${config.acquisitionFrameRateAbs.toFixed(1)} fps`}</div>
+                            <div className="metric-chip">IP: {selected?.ipAddress ?? '192.168.0.200'}</div>
+                            <div className="metric-chip">{config.transmissionType}</div>
+                        </div>
+                    </div>
+                )}
+
+                {/* ── LOG PANEL ──────────────────────────────────── */}
+                <div className="basler-log-panel">
+                    <div className="basler-log-header">
+                        <span>📋 pylon Log</span>
+                        <button className="basler-tab-mini" onClick={() => setLogs([])}>Limpiar</button>
+                    </div>
+                    <div className="basler-log-body">
+                        {logs.length === 0 && <span className="log-empty">Sin actividad. Escanea la red o conecta la cámara.</span>}
+                        {logs.map((l, i) => (
+                            <div key={i} className="log-line">
+                                <span className="log-time">{l.time}</span>
+                                <span className="log-msg" style={{ color: logColor(l.level) }}>{l.msg}</span>
+                            </div>
+                        ))}
+                        <div ref={logsEndRef} />
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    );
+}
