@@ -3,6 +3,8 @@ import './App.css';
 import logisnextLogo from '../Imagenes/logo.PNG';
 import florcliftImage from '../Imagenes/FLORCLIFT_XL.PNG';
 import { getChatResponse } from './services/gemini';
+import PlcConfig from './PlcConfig';
+import BaslerCamera from './BaslerCamera';
 
 interface Detection {
   id: number;
@@ -15,13 +17,7 @@ interface Detection {
   color: string;
 }
 
-interface Alert {
-  id: string;
-  title: string;
-  desc: string;
-  time: string;
-  level: 'CRITICAL' | 'WARNING' | 'INFO';
-}
+
 
 interface VideoMapping {
   id: string;
@@ -35,7 +31,7 @@ interface ChatMessage {
 }
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'live' | 'mapping' | 'chat'>('live');
+  const [activeTab, setActiveTab] = useState<'live' | 'mapping' | 'chat' | 'plc' | 'camera'>('live');
   const [fps, setFps] = useState(0);
   const [confidenceAvg, setConfidenceAvg] = useState(94);
   const [modelActive, setModelActive] = useState(true);
@@ -54,11 +50,7 @@ function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  const mockAlerts: Alert[] = [
-    { id: '1', title: 'Proximity Alert', desc: 'Operator near active forklift zone', time: '14:22:01', level: 'CRITICAL' },
-    { id: '2', title: 'Safety Zone Breach', desc: 'Hazard area entry without permit', time: '12:30:44', level: 'WARNING' },
-    { id: '3', title: 'Asset Tagged', desc: 'New Forklift unit detected in bay 4', time: '13:45:12', level: 'INFO' }
-  ];
+
 
   useEffect(() => {
     // Simulating camera feed via webcam
@@ -170,9 +162,10 @@ function App() {
         </div>
         <div className="nav-links">
           <button className={`nav-btn ${activeTab === 'live' ? 'active' : ''}`} onClick={() => setActiveTab('live')}>Live Inference</button>
+          <button className={`nav-btn ${activeTab === 'camera' ? 'active' : ''}`} onClick={() => setActiveTab('camera')}>📷 Basler Camera</button>
           <button className={`nav-btn ${activeTab === 'mapping' ? 'active' : ''}`} onClick={() => setActiveTab('mapping')}>Video Mapping</button>
           <button className={`nav-btn ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>AI Assistant</button>
-          <button className="nav-btn">Settings</button>
+          <button className={`nav-btn ${activeTab === 'plc' ? 'active' : ''}`} onClick={() => setActiveTab('plc')}>🏭 PLC OMRON</button>
         </div>
       </nav>
 
@@ -272,29 +265,14 @@ function App() {
                 </div>
               </div>
 
-              <div className="alerts-section">
-                <div className="alerts-header">
-                  <h2>Critical Detections</h2>
-                  <span className="badge-count">3</span>
-                </div>
-                <div className="alerts-list">
-                  {mockAlerts.map(alert => (
-                    <div key={alert.id} className={`alert-item ${alert.level.toLowerCase()}`}>
-                      <div className="alert-time">{alert.time}</div>
-                      <div className="alert-content">
-                        <h4>{alert.title}</h4>
-                        <p>{alert.desc}</p>
-                      </div>
-                      <div className={`alert-level-badge ${alert.level.toLowerCase()}`}>
-                        {alert.level}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
+
 
             </aside>
           </>
+        ) : activeTab === 'camera' ? (
+          <BaslerCamera />
+        ) : activeTab === 'plc' ? (
+          <PlcConfig />
         ) : activeTab === 'mapping' ? (
           <div className="mapping-container">
             <div className="mapping-header">
