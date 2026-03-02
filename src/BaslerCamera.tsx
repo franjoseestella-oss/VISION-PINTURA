@@ -383,6 +383,88 @@ export default function BaslerCamera() {
         setServerFrames(0);
     };
 
+    // ── Conexión rápida — Cámara ON (1 click, sin escanear) ──────────────────
+    const handleQuickConnect = async () => {
+        if (isConnected) {
+            await handleDisconnect();
+            return;
+        }
+        setStatus('connecting');
+        setErrorMsg('');
+        log('info', '═════════════════════════════════════════');
+        log('info', '⚡ Cámara ON — conexión rápida a 192.168.0.200...');
+
+        const quickParams = {
+            connectionMode: 'ip',
+            ipAddress: '192.168.0.200',
+            serialNumber: '40002788',
+            pixelFormat: config.pixelFormat,
+            width: config.width,
+            height: config.height,
+            offsetX: config.offsetX,
+            offsetY: config.offsetY,
+            exposureAuto: config.exposureAuto,
+            exposureTimeAbs: config.exposureTimeAbs,
+            gainAuto: config.gainAuto,
+            gainRaw: config.gainRaw,
+            acquisitionMode: config.acquisitionMode,
+            acquisitionFrameRateEnable: config.acquisitionFrameRateEnable,
+            acquisitionFrameRateAbs: config.acquisitionFrameRateAbs,
+            triggerMode: config.triggerMode,
+            triggerSelector: config.triggerSelector,
+            triggerSource: config.triggerSource,
+        };
+
+        if (backendOk) {
+            try {
+                const r = await fetch(`${BACKEND}/api/connect`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(quickParams),
+                });
+                const data = await r.json();
+                if (data.ok) {
+                    const tag = data.simulated ? '(SIMULADO)' : '(REAL ✔)';
+                    log('success', `✓ Cámara ON ${tag}`);
+                    log('success', `✓ Stream MJPEG activo — ${BACKEND}/api/stream`);
+                    const cam: BaslerDevice = {
+                        index: 0, modelName: 'acA1920-48gm', serialNumber: '40002788',
+                        deviceType: 'GigE', ipAddress: '192.168.0.200',
+                        subnetMask: '255.255.255.0', macAddress: '', firmwareVersion: '', status: 'connected',
+                    };
+                    setSelected(cam);
+                    setDevices([cam]);
+                    setStatus('connected');
+                    setStreamKey(k => k + 1);
+                    setActiveTab('preview');
+                } else {
+                    log('error', `Error: ${data.error}`);
+                    setErrorMsg(data.error ?? 'Error de conexión');
+                    setStatus('error');
+                }
+            } catch (e) {
+                log('error', `No se pudo contactar con camera_server.py: ${e}`);
+                log('info', 'Asegúrate de que camera_server.py está en ejecución.');
+                setErrorMsg('Inicia camera_server.py primero');
+                setStatus('error');
+            }
+        } else {
+            // Sin backend — simular
+            log('warn', 'camera_server.py no disponible — modo simulación');
+            await new Promise(r => setTimeout(r, 600));
+            log('success', '✓ Cámara simulada activa.');
+            const cam: BaslerDevice = {
+                index: 0, modelName: 'acA1920-48gm', serialNumber: '40002788',
+                deviceType: 'GigE', ipAddress: '192.168.0.200',
+                subnetMask: '255.255.255.0', macAddress: '', firmwareVersion: 'V1.1-0', status: 'connected',
+            };
+            setSelected(cam);
+            setDevices([cam]);
+            setStatus('connected');
+            setActiveTab('preview');
+        }
+    };
+
     const set = <K extends keyof CameraConfig>(key: K, value: CameraConfig[K]) =>
         setConfig(prev => ({ ...prev, [key]: value }));
     const setTL = <K extends keyof TLConfig>(key: K, value: TLConfig[K]) =>
@@ -435,8 +517,41 @@ export default function BaslerCamera() {
                         <div className="basler-subtitle">pylon SDK 7.x · GigE Vision · Mono · 1920×1200 · 48fps</div>
                     </div>
                 </div>
-                <div className="basler-status-badge" style={{ color: getStatusColor(), borderColor: getStatusColor() }}>
-                    {status === 'connected' ? '● GRABBING' : status === 'scanning' ? '◌ SCANNING' : status === 'connecting' ? '◌ OPENING' : status === 'error' ? '✖ ERROR' : '○ CLOSED'}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    {/* ── Botón CÁMARA ON/OFF ─────────────────────── */}
+                    <button
+                        onClick={handleQuickConnect}
+                        disabled={status === 'scanning' || status === 'connecting'}
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: 8,
+                            padding: '10px 20px', borderRadius: 8, fontWeight: 700,
+                            fontSize: '0.95rem', cursor: isBusy ? 'wait' : 'pointer',
+                            border: `2px solid ${isConnected ? '#ff4444' : '#00ff64'}`,
+                            background: isConnected
+                                ? 'rgba(255,68,68,0.12)'
+                                : 'rgba(0,255,100,0.12)',
+                            color: isConnected ? '#ff6666' : '#00ff64',
+                            transition: 'all 0.2s',
+                            boxShadow: isConnected
+                                ? '0 0 14px rgba(255,68,68,0.3)'
+                                : '0 0 14px rgba(0,255,100,0.3)',
+                        }}
+                        title={isConnected ? 'Desconectar cámara' : 'Conectar a acA1920-48gm · 192.168.0.200'}
+                    >
+                        {/* Icono power */}
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                            <path d="M12 2v6" />
+                            <path d="M6.3 6.3a8 8 0 1 0 11.4 0" />
+                        </svg>
+                        {status === 'connecting'
+                            ? 'Conectando…'
+                            : isConnected
+                                ? 'CÁMARA OFF'
+                                : 'CÁMARA ON'}
+                    </button>
+                    <div className="basler-status-badge" style={{ color: getStatusColor(), borderColor: getStatusColor() }}>
+                        {status === 'connected' ? '● GRABBING' : status === 'scanning' ? '◌ SCANNING' : status === 'connecting' ? '◌ OPENING' : status === 'error' ? '✖ ERROR' : '○ CLOSED'}
+                    </div>
                 </div>
             </div>
 
