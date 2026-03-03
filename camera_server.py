@@ -108,7 +108,7 @@ def connect_camera(params: dict) -> dict:
                 "status": "connected",
                 "model": "acA1920-48gm (SIMULADO)",
                 "serial": "40002788",
-                "ip": "192.168.0.200",
+                "ip": "192.168.0.201",
                 "firmware": "V1.1-0",
                 "error": "",
             })
@@ -290,7 +290,7 @@ def _simulate_frames(params):
         # Overlay de texto
         cv2.putText(frame, f"SIMULADO - SN:40002788", (10, 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 100), 1)
-        cv2.putText(frame, f"IP:192.168.0.200  {W}x{H}", (10, 40),
+        cv2.putText(frame, f"IP:192.168.0.201  {W}x{H}", (10, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
         cv2.putText(frame, f"Exp:{int(exposure)}us Gain:{gain}", (10, 56),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
@@ -467,6 +467,21 @@ if __name__ == "__main__":
 
     server = HTTPServer(("0.0.0.0", PORT), CameraHandler)
     print(f"\n[INFO] Servidor escuchando en puerto {PORT}...")
+    
+    # Auto-conectar en el arranque
+    print("[INFO] Intentando auto-conectar cámara...")
+    connect_camera({
+        "connectionMode": "auto",
+        "ipAddress": "192.168.0.201",
+        "pixelFormat": "Mono8",
+        "width": 1920,
+        "height": 1200,
+        "exposureAuto": "Off",
+        "exposureTimeAbs": 10000,
+        "gainAuto": "Off",
+        "gainRaw": 136,
+    })
+
     print("[INFO] Presiona Ctrl+C para detener.\n")
     try:
         server.serve_forever()

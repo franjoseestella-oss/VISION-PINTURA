@@ -88,7 +88,7 @@ const DEFAULT_TL_CONFIG: TLConfig = {
     migrationModeEnable: false,
     enablePersistentIp: false,
     enableDhcp: true,
-    persistentIp: '192.168.0.200',
+    persistentIp: '192.168.0.201',
     persistentSubnet: '255.255.255.0',
     persistentGateway: '192.168.0.1',
 };
@@ -139,7 +139,7 @@ export default function BaslerCamera() {
     const animRef = useRef<number>(0);
     const logsEndRef = useRef<HTMLDivElement>(null);
 
-    const BACKEND = 'http://localhost:8765';
+    const BACKEND = 'http://127.0.0.1:8765';
 
     const log = (level: 'info' | 'warn' | 'error' | 'success', msg: string) => {
         const time = new Date().toLocaleTimeString('es-ES', { hour12: false });
@@ -156,8 +156,14 @@ export default function BaslerCamera() {
             try {
                 const r = await fetch(`${BACKEND}/api/status`, { signal: AbortSignal.timeout(2000) });
                 if (r.ok) {
+                    const data = await r.json();
                     setBackendOk(true);
                     log('success', `✓ camera_server.py detectado en ${BACKEND}`);
+                    if (data.status === 'connected') {
+                        setStatus('connected');
+                        setActiveTab('preview');
+                        log('success', `Cámara vinculada al stream activo automáticamente.`);
+                    }
                 } else {
                     setBackendOk(false);
                 }
@@ -227,7 +233,7 @@ export default function BaslerCamera() {
             ctx.fillText(`● SIMULADO — Sin camera_server.py`, 14, 24);
             ctx.fillStyle = '#cdd9e5'; ctx.font = '11px monospace';
             ctx.fillText(`SN:40002788  ID:10726304`, 14, 40);
-            ctx.fillText(`IP: 192.168.0.200`, 14, 54);
+            ctx.fillText(`IP: 192.168.0.201`, 14, 54);
             ctx.fillText(`Format: ${config.pixelFormat}  AOI: ${config.width}×${config.height}`, 14, 68);
             ctx.fillText(`Exp: ${config.exposureTimeAbs.toLocaleString()}µs  Gain: ${config.gainRaw}`, 14, 82);
             ctx.fillText(`Frame#: ${frames}  (instala camera_server.py)`, 14, 96);
@@ -312,7 +318,7 @@ export default function BaslerCamera() {
                     body: JSON.stringify({
                         connectionMode: config.connectionMode,
                         serialNumber: config.serialNumber || cam?.serialNumber,
-                        ipAddress: config.ipAddress || cam?.ipAddress || '192.168.0.200',
+                        ipAddress: config.ipAddress || cam?.ipAddress || '192.168.0.201',
                         pixelFormat: config.pixelFormat,
                         width: config.width,
                         height: config.height,
@@ -953,7 +959,7 @@ ${tlConfig.enablePersistentIp ? `
 # C++ GigE IP configuration
 # cam.ChangeIpConfiguration(true, ${tlConfig.enableDhcp})
 # cam.SetPersistentIpAddress(
-#   "${tlConfig.persistentIp || '192.168.0.200'}",
+#   "${tlConfig.persistentIp || '192.168.0.201'}",
 #   "${tlConfig.persistentSubnet}",
 #   "${tlConfig.persistentGateway}")
 ` : ''}`}</pre>
@@ -984,7 +990,7 @@ ${tlConfig.enablePersistentIp ? `
                         {backendOk ? (
                             <img
                                 key={streamKey}
-                                src={`http://localhost:8765/api/stream?t=${streamKey}`}
+                                src={`http://127.0.0.1:8765/api/stream?t=${streamKey}`}
                                 alt="Basler MJPEG Stream"
                                 className="basler-preview-canvas"
                                 style={{ background: '#000', border: '2px solid #00ff6440' }}
@@ -1001,7 +1007,7 @@ ${tlConfig.enablePersistentIp ? `
                             <div className="metric-chip">Exp: {config.exposureTimeAbs.toLocaleString()} µs</div>
                             <div className="metric-chip">Gain: {config.gainRaw} raw</div>
                             <div className="metric-chip">{backendOk ? `${serverFps} fps` : `${config.acquisitionFrameRateAbs.toFixed(1)} fps`}</div>
-                            <div className="metric-chip">IP: {selected?.ipAddress ?? '192.168.0.200'}</div>
+                            <div className="metric-chip">IP: {selected?.ipAddress ?? '192.168.0.201'}</div>
                             <div className="metric-chip">{config.transmissionType}</div>
                         </div>
                     </div>
