@@ -43,12 +43,11 @@ function formatValue(v: PLCVariable): string {
 export default function PlcVariables() {
     const [variables, setVariables] = useState<PLCVariable[]>(DEFAULT_VARIABLES);
     const [status, setStatus] = useState<ConnectionStatus>('disconnected');
-    const [isPolling, setIsPolling] = useState(false);
     const [filter, setFilter] = useState<'ALL' | PLCVariable['memoryArea'] | PLCVariable['access']>('ALL');
     const [searchTerm, setSearchTerm] = useState('');
     const [viewMode, setViewMode] = useState<'cards' | 'table'>('cards');
-    const [plcIp, setPlcIp] = useState('192.168.1.100');
-    const [pollInterval, setPollInterval] = useState(1000);
+    const [plcIp, setPlcIp] = useState('192.168.0.1');
+    const [pollInterval, setPollInterval] = useState(500);
     const [eventLog, setEventLog] = useState<{ ts: string; msg: string; type: 'change' | 'connect' | 'error' }[]>([]);
     const [totalUpdates, setTotalUpdates] = useState(0);
 
@@ -64,23 +63,30 @@ export default function PlcVariables() {
 
     const handleConnect = () => {
         setStatus('connecting');
-        addEvent('connect', `Conectando a ws://localhost:8765 → CJ2M ${plcIp}`);
+        addEvent('connect', `Conectando a ws://127.0.0.1:8766 → CJ2M ${plcIp}`);
 
         try {
-            const ws = new WebSocket('ws://127.0.0.1:8765');
+            const ws = new WebSocket('ws://127.0.0.1:8766');
             wsRef.current = ws;
 
             ws.onopen = () => {
-                setStatus('connected');
-                setIsPolling(true);
-                addEvent('connect', `✓ Conectado al bridge FINS TCP · CJ2M ${plcIp}`);
+                // No configuramos status a connected todavía, esperamos al Python
+                addEvent('connect', `Conectando al bridge Python... Solicitando link FINS a ${plcIp}`);
                 ws.send(JSON.stringify({ cmd: 'connect', ip: plcIp, port: 9600 }));
             };
 
             ws.onmessage = (e) => {
                 try {
                     const msg = JSON.parse(e.data);
-                    if (msg.type === 'data') {
+                    if (msg.type === 'status') {
+                        if (msg.payload === 'connected') {
+                            setStatus('connected');
+                            addEvent('connect', `✓ ¡Enlace FINS Real Establecido con OMRON CJ2M!`);
+                        }
+                    } else if (msg.type === 'error') {
+                        setStatus('disconnected');
+                        addEvent('error', `❌ Error del PLC: ${msg.payload}`);
+                    } else if (msg.type === 'data') {
                         const data = msg.payload as Record<string, unknown>;
                         setVariables(prev => prev.map(v => {
                             const newVal = data[v.name] !== undefined ? data[v.name] as PLCVariable['value'] : v.value;
@@ -96,19 +102,16 @@ export default function PlcVariables() {
             };
 
             ws.onerror = () => {
-                addEvent('connect', '⚠️ Bridge no disponible → Modo simulación activo');
-                setStatus('connected');
-                setIsPolling(true);
+                addEvent('error', '⚠️ Bridge Python no encontrado. ¿Está plc_server.py ejecutándose?');
+                setStatus('disconnected');
             };
 
             ws.onclose = () => {
                 setStatus('disconnected');
-                setIsPolling(false);
             };
         } catch {
-            addEvent('connect', 'WebSocket no disponible → Modo simulación');
-            setStatus('connected');
-            setIsPolling(true);
+            addEvent('error', 'Fallo crítico al iniciar WebSocket local');
+            setStatus('disconnected');
         }
     };
 
@@ -116,13 +119,13 @@ export default function PlcVariables() {
         wsRef.current?.close();
         wsRef.current = null;
         setStatus('disconnected');
-        setIsPolling(false);
         if (pollRef.current) clearInterval(pollRef.current);
         setVariables(p => p.map(v => ({ ...v, value: null, lastUpdate: null, changed: false })));
         addEvent('connect', 'Desconectado del PLC OMRON CJ2M');
     };
 
-    // Simulación de polling
+    // Simulación de polling (DESACTIVADA)
+    /*
     useEffect(() => {
         if (!isPolling) return;
         pollRef.current = setInterval(() => {
@@ -144,6 +147,7 @@ export default function PlcVariables() {
         }, pollInterval);
         return () => { if (pollRef.current) clearInterval(pollRef.current); };
     }, [isPolling, pollInterval]);
+    */
 
     // Clear "changed" flash after 600ms
     useEffect(() => {

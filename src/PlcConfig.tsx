@@ -7,7 +7,7 @@ import { useState, useEffect, useRef } from 'react';
 // Comandos: SEND (escribir), RECV (leer), CMND (control RUN/STOP/RESET)
 // NOTA: CJ2M soporta hasta 256 conexiones simultáneas FINS TCP.
 // Ciclo mín: 0.1 ms · Latencia red esperada: 1–10 ms
-// Backend: Python + librería omron-fins → WebSocket ws://localhost:8765
+// Config backend camera_server: 8765, plc_bridge: 8766
 // ──────────────────────────────────────────────────────────────────────────────
 
 interface FINSConfig {
@@ -19,6 +19,7 @@ interface FINSConfig {
     unitAddr: number;       // 0 = CPU Unit
     pollInterval: number;   // ms entre lecturas (mín recomendado: 500ms)
     maxChannels: number;    // CJ2M: hasta 256 conexiones FINS simultáneas
+    connectionMode: 'client' | 'server'; // Modo de conexión FINS TCP
 }
 
 interface PLCVariable {
@@ -59,14 +60,15 @@ const MEMORY_DESCRIPTIONS: Record<PLCVariable['memoryArea'], string> = {
 
 export default function PlcConfig() {
     const [config, setConfig] = useState<FINSConfig>({
-        plcIp: '192.168.1.100',
+        plcIp: '192.168.0.1',
         plcPort: 9600,
-        finsNode: 100,      // auto: último octeto de plcIp
+        finsNode: 1,      // auto: último octeto de plcIp
         srcNode: 50,        // último octeto de la IP del servidor Python
         networkAddr: 0,
         unitAddr: 0,
         pollInterval: 500,  // CJ2M: ciclo rápido, 500 ms es seguro
         maxChannels: 256,   // CJ2M soporta hasta 256 conexiones FINS TCP
+        connectionMode: 'client', // Por defecto el PC es el cliente FINS
     });
 
     const [variables, setVariables] = useState<PLCVariable[]>([
@@ -98,6 +100,7 @@ export default function PlcConfig() {
     ]);
 
     const [status, setStatus] = useState<ConnectionStatus>('disconnected');
+    const [scanStatus, setScanStatus] = useState<'unknown' | 'scanning' | 'found' | 'not_found' | 'error'>('unknown');
     const [activeSection, setActiveSection] = useState<'connection' | 'variables' | 'monitor' | 'python'>('connection');
     const [logs, setLogs] = useState<PLCLog[]>([
         { ts: new Date().toLocaleTimeString(), type: 'info', msg: 'Sistema FINS TCP listo · OMRON CJ2M · Puerto 9600' },
@@ -125,28 +128,30 @@ export default function PlcConfig() {
         log('info', `Iniciando conexión FINS TCP → ${config.plcIp}:${config.plcPort}`);
         log('fins', `Frame FINS: ICF=C0, DNA=00, DA1=${String(config.finsNode).padStart(2, '0')}, DA2=00`);
         log('fins', `          SNA=00, SA1=${String(config.srcNode).padStart(2, '0')}, SA2=00, SID=00`);
-        log('info', `Conectando al Python FINS Bridge en ws://localhost:8765...`);
+        log('info', `Conectando al Python FINS Bridge en ws://127.0.0.1:8766...`);
         log('info', `CJ2M: EtherNet/IP integrado · CPU3x · Nodo FINS ${config.finsNode}`);
 
         // Try real WebSocket connection to Python bridge
         try {
-            const ws = new WebSocket('ws://127.0.0.1:8765');
+            const ws = new WebSocket('ws://127.0.0.1:8766');
             wsRef.current = ws;
 
             ws.onopen = () => {
-                setStatus('connected');
-                setIsPolling(true);
-                log('success', `✓ WebSocket conectado al Python FINS Bridge (ws://localhost:8765)`);
-                log('success', `✓ FINS TCP handshake completado con ${config.plcIp}:${config.plcPort}`);
-                log('success', `✓ Nodo${config.finsNode} (CJ2M) ↔ Nodo${config.srcNode} (Servidor)`);
-                log('info', `Polling activo cada ${config.pollInterval}ms · CJ2M hasta 256 canales`);
+                log('info', `Esperando conexión directa FINS al OMRON CJ2M...`);
                 ws.send(JSON.stringify({ cmd: 'connect', ip: config.plcIp, port: config.plcPort, node: config.finsNode }));
             };
 
             ws.onmessage = (e) => {
                 try {
                     const msg: WsMessage = JSON.parse(e.data);
-                    if (msg.type === 'data') {
+                    if (msg.type === 'status') {
+                        if (msg.payload === 'connected') {
+                            setStatus('connected');
+                            log('success', `✓ FINS UDP handshake completado con ${config.plcIp}:${config.plcPort}`);
+                            log('success', `✓ Enlace FINS establecido. Nodo${config.finsNode} ↔ Nodo${config.srcNode}`);
+                            log('info', `Polling activo cada ${config.pollInterval}ms`);
+                        }
+                    } else if (msg.type === 'data') {
                         const data = msg.payload as Record<string, unknown>;
                         setVariables(prev => prev.map(v => ({
                             ...v,
@@ -154,30 +159,54 @@ export default function PlcConfig() {
                             lastUpdate: data[v.name] !== undefined ? new Date().toLocaleTimeString() : v.lastUpdate,
                         })));
                     } else if (msg.type === 'error') {
-                        log('error', `FINS Error: ${msg.payload}`);
+                        log('error', `❌ Error del PLC o Python Bridge: ${msg.payload}`);
+                        setStatus('disconnected');
                     }
                 } catch { /* ignore parse errors */ }
             };
 
             ws.onerror = () => {
-                log('warning', `⚠️ Python Bridge no disponible. Activando modo simulación...`);
-                log('info', `Para conexión real: ejecuta plc_bridge.py en el servidor`);
-                setStatus('connected');
-                setIsPolling(true);
-                // Fallback to simulation
+                log('error', `❌ WebSocket no disponible. ¿plc_server.py está en marcha?`);
+                setStatus('disconnected');
             };
 
             ws.onclose = () => {
-                if (status === 'connected') {
-                    setStatus('disconnected');
-                    setIsPolling(false);
-                    log('warning', 'WebSocket cerrado. Desconectado del PLC.');
-                }
+                setStatus('disconnected');
+                setIsPolling(false);
+                log('warning', 'WebSocket cerrado. Desconectado del PLC.');
             };
         } catch {
-            log('warning', 'WebSocket no disponible. Modo simulación activado.');
-            setStatus('connected');
-            setIsPolling(true);
+            log('error', 'Fallo crítico al iniciar WebSocket local');
+            setStatus('disconnected');
+        }
+    };
+
+    const handleScan = async () => {
+        log('info', `📡 Escaneando PLC en red (Ping -> ${config.plcIp}:${config.plcPort})...`);
+        setScanStatus('scanning');
+        try {
+            const res = await fetch(`http://127.0.0.1:8765/api/scan_plc?ip=${config.plcIp}&port=${config.plcPort}`);
+            const data = await res.json();
+            if (data.ok) {
+                if (data.alive) {
+                    setScanStatus('found');
+                    log('success', `✓ PLC encontrado en ${config.plcIp} (Ping OK).`);
+                    if (data.tcp_open) {
+                        log('success', `✓ Puerto TCP ${config.plcPort} abierto y respondiendo.`);
+                    } else {
+                        log('warning', `⚠️ El PLC responde al ping, pero el puerto TCP ${config.plcPort} parece cerrado.`);
+                    }
+                } else {
+                    setScanStatus('not_found');
+                    log('error', `❌ No hay respuesta del PLC en ${config.plcIp}.`);
+                }
+            } else {
+                setScanStatus('error');
+                log('error', '❌ Error al hacer parse desde camera_server');
+            }
+        } catch (e) {
+            setScanStatus('error');
+            log('error', '❌ No se pudo usar camera_server para el escaneo.');
         }
     };
 
@@ -244,7 +273,7 @@ export default function PlcConfig() {
     const pythonScript = `#!/usr/bin/env python3
 """
 plc_bridge.py — OMRON CJ2M FINS TCP Bridge
-React App <–– WebSocket (ws://localhost:8765) ––> Python ––> FINS TCP (${config.plcIp}:${config.plcPort})
+React App <–– WebSocket (ws://127.0.0.1:8766) ––> Python ––> FINS TCP (${config.plcIp}:${config.plcPort})
 
 Modelo: OMRON CJ2M (CPU31/32/33/34/35)
 EtherNet/IP integrado en CPU3x · FINS TCP puerto 9600
@@ -267,8 +296,8 @@ PLC_IP      = "${config.plcIp}"
 PLC_PORT    = ${config.plcPort}
 PLC_NODE    = ${config.finsNode}     # Último octeto de la IP del CJ2M
 SRC_NODE    = ${config.srcNode}     # Último octeto de la IP de este servidor
-WS_HOST     = "localhost"
-WS_PORT     = 8765
+WS_HOST     = "0.0.0.0"
+WS_PORT     = 8766
 POLL_INTERVAL = ${config.pollInterval / 1000}  # segundos · CJ2M soporta polling rápido
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -456,6 +485,26 @@ if __name__ == "__main__":
                                 <h3>🌐 Red — OMRON CJ2M</h3>
                                 <div className="plc-form">
                                     <div className="plc-field">
+                                        <label>Modo de Conexión</label>
+                                        <select
+                                            value={config.connectionMode}
+                                            onChange={e => setConfig({ ...config, connectionMode: e.target.value as 'client' | 'server' })}
+                                            disabled={status === 'connected'}
+                                            style={{
+                                                padding: '8px 12px',
+                                                border: '1px solid #374151',
+                                                borderRadius: '6px',
+                                                backgroundColor: '#1f2937',
+                                                color: '#f9fafb',
+                                                width: '100%'
+                                            }}
+                                        >
+                                            <option value="client">Cliente FINS (La aplicación conecta al PLC)</option>
+                                            <option value="server">Servidor FINS (El PLC envía datos a la aplicación)</option>
+                                        </select>
+                                        <span className="plc-hint">Si usas "Cliente" introduce la IP del PLC. Si usas "Servidor" el PLC conectará al PC automáticamente.</span>
+                                    </div>
+                                    <div className="plc-field">
                                         <label>IP Address del PLC</label>
                                         <input value={config.plcIp} onChange={e => setConfig({ ...config, plcIp: e.target.value })}
                                             placeholder="192.168.1.100" disabled={status === 'connected'} />
@@ -539,16 +588,21 @@ if __name__ == "__main__":
                                     <div>React App</div>
                                     <div className="arch-sub">localhost:5173</div>
                                 </div>
-                                <div className="arch-arrow">WebSocket<br /><small>ws://localhost:8765</small></div>
+                                <div className="arch-arrow">WebSocket<br /><small>ws://127.0.0.1:8766</small></div>
                                 <div className="arch-node">
                                     <div className="arch-icon">🐍</div>
                                     <div>Python Bridge</div>
                                     <div className="arch-sub">omron-fins lib</div>
                                 </div>
                                 <div className="arch-arrow">FINS TCP<br /><small>{config.plcIp}:{config.plcPort}</small></div>
-                                <div className="arch-node">
+                                <div className="arch-node" style={{ position: 'relative' }}>
                                     <div className="arch-icon">🏭</div>
-                                    <div>CJ2M</div>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                                        <span style={{ fontWeight: 'bold' }}>CJ2M</span>
+                                        {scanStatus === 'scanning' && <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: '#f59e0b', animation: 'pulse 1s infinite' }} title="Escaneando..." />}
+                                        {scanStatus === 'found' && <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 8px #22c55e' }} title="PLC Encontrado" />}
+                                        {(scanStatus === 'not_found' || scanStatus === 'error') && <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: '#ef4444' }} title="No encontrado" />}
+                                    </div>
                                     <div className="arch-sub">Nodo {config.finsNode}</div>
                                 </div>
                             </div>
@@ -557,9 +611,14 @@ if __name__ == "__main__":
                         {/* Botones control */}
                         <div className="plc-connect-row">
                             {status !== 'connected' ? (
-                                <button className="plc-btn-connect" onClick={handleConnect} disabled={status === 'connecting'}>
-                                    {status === 'connecting' ? '⏳ Conectando FINS TCP...' : '🔌 Conectar al CJ2M'}
-                                </button>
+                                <>
+                                    <button className="plc-btn-connect" onClick={handleScan} style={{ background: '#3b82f6' }}>
+                                        📡 Escanear PLC
+                                    </button>
+                                    <button className="plc-btn-connect" onClick={handleConnect} disabled={status === 'connecting'}>
+                                        {status === 'connecting' ? '⏳ Conectando FINS TCP...' : '🔌 Conectar al CJ2M'}
+                                    </button>
+                                </>
                             ) : (
                                 <>
                                     <button className="plc-btn-cmnd-run" onClick={() => handleCmnd('RUN')}>▶ CMND → RUN</button>

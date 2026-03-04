@@ -138,6 +138,29 @@ export default function BaslerCamera() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const animRef = useRef<number>(0);
     const logsEndRef = useRef<HTMLDivElement>(null);
+    // ── Captura de fotos ──────────────────────────────────────────────────────
+    const [saveDir, setSaveDir] = useState('C:\\Fotos_Basler');
+    const [customFilename, setCustomFilename] = useState('');
+    const [captureMsg, setCaptureMsg] = useState<{ ok: boolean; text: string } | null>(null);
+    const [capturing, setCapturing] = useState(false);
+    const [gallery, setGallery] = useState<{ filename: string; path: string; size_kb: number; time: string }[]>();
+    // ── Grabación de vídeo ───────────────────────────────────────────────
+    const [videoDir, setVideoDir] = useState('C:\\Videos_Basler');
+    const [videoFilename, setVideoFilename] = useState('');
+    const [videoFps, setVideoFps] = useState(10);
+    const [videoCodec, setVideoCodec] = useState<'MJPG' | 'mp4v'>('MJPG');
+    const [isRecording, setIsRecording] = useState(false);
+    const [recElapsed, setRecElapsed] = useState(0);
+    const [recFrames, setRecFrames] = useState(0);
+    const [recMsg, setRecMsg] = useState<{ ok: boolean; text: string } | null>(null);
+    const [videoGallery, setVideoGallery] = useState<{ filename: string; path: string; size_mb: number; duration_s: number; time: string }[]>();
+    // ── Zoom / Pan ─────────────────────────────────────────────────────────────
+    const [zoomLevel, setZoomLevel] = useState(1.0);
+    const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+    const [isPanning, setIsPanning] = useState(false);
+    const panStart = useRef({ mx: 0, my: 0, px: 0, py: 0 });
+    const streamWrapRef = useRef<HTMLDivElement>(null);
+    const [panelOpen, setPanelOpen] = useState(true);
 
     const BACKEND = 'http://127.0.0.1:8765';
 
@@ -189,6 +212,20 @@ export default function BaslerCamera() {
         }, 1000);
         return () => clearInterval(interval);
     }, [status, backendOk]);
+
+    // ── Poll estado grabación ────────────────────────────────────────────────
+    useEffect(() => {
+        if (!isRecording || !backendOk) return;
+        const interval = setInterval(async () => {
+            try {
+                const r = await fetch(`${BACKEND}/api/record/status`);
+                const data = await r.json();
+                setRecElapsed(data.elapsed_s ?? 0);
+                setRecFrames(data.frames_written ?? 0);
+            } catch { /* ignore */ }
+        }, 500);
+        return () => clearInterval(interval);
+    }, [isRecording, backendOk]);
 
     // ── Canvas simulado (fallback cuando SIN backend) ───────────────────────
     useEffect(() => {
@@ -370,6 +407,128 @@ export default function BaslerCamera() {
             setActiveTab('preview');
         }
     };
+
+    // ── Captura de foto ──────────────────────────────────────────────────────────
+    const handleSnapshot = async () => {
+        if (!saveDir.trim()) {
+            setCaptureMsg({ ok: false, text: 'Indica un directorio de destino.' });
+            return;
+        }
+        setCapturing(true);
+        setCaptureMsg(null);
+        try {
+            const params = new URLSearchParams({
+                dir: saveDir.trim(),
+                ...(customFilename.trim() ? { filename: customFilename.trim() } : {}),
+            });
+            const r = await fetch(`${BACKEND}/api/snapshot_save?${params}`);
+            const data = await r.json();
+            if (data.ok) {
+                const time = new Date().toLocaleTimeString('es-ES', { hour12: false });
+                setCaptureMsg({ ok: true, text: `✔ Guardada: ${data.filename}  (${data.size_kb} KB)` });
+                log('success', `📸 Foto guardada → ${data.path}  [${data.size_kb} KB]`);
+                setGallery(prev => [{ filename: data.filename, path: data.path, size_kb: data.size_kb, time }, ...(prev ?? []).slice(0, 11)]);
+                if (customFilename.trim()) setCustomFilename(''); // limpiar nombre personalizado
+            } else {
+                setCaptureMsg({ ok: false, text: `✖ Error: ${data.error}` });
+                log('error', `📸 Error al guardar foto: ${data.error}`);
+            }
+        } catch (e) {
+            setCaptureMsg({ ok: false, text: `✖ No se pudo contactar con camera_server.py` });
+            log('error', `📸 Excepción: ${e}`);
+        } finally {
+            setCapturing(false);
+        }
+    };
+
+    // ── Grabación de vídeo ───────────────────────────────────────────────────────────
+    const handleRecordStart = async () => {
+        if (!videoDir.trim()) {
+            setRecMsg({ ok: false, text: 'Indica un directorio de destino.' });
+            return;
+        }
+        setRecMsg(null);
+        try {
+            const r = await fetch(`${BACKEND}/api/record/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    dir: videoDir.trim(),
+                    filename: videoFilename.trim() || '',
+                    fps: videoFps,
+                    codec: videoCodec,
+                }),
+            });
+            const data = await r.json();
+            if (data.ok) {
+                setIsRecording(true);
+                setRecElapsed(0);
+                setRecFrames(0);
+                log('success', `🟥 REC iniciada → ${data.path}  @${data.fps}fps`);
+                setRecMsg({ ok: true, text: `● REC activa: ${data.filename}` });
+            } else {
+                setRecMsg({ ok: false, text: `✖ ${data.error}` });
+                log('error', `REC error: ${data.error}`);
+            }
+        } catch (e) {
+            setRecMsg({ ok: false, text: '✖ No se pudo contactar con camera_server.py' });
+        }
+    };
+
+    const handleRecordStop = async () => {
+        try {
+            const r = await fetch(`${BACKEND}/api/record/stop`, { method: 'POST' });
+            const data = await r.json();
+            setIsRecording(false);
+            if (data.ok) {
+                const time = new Date().toLocaleTimeString('es-ES', { hour12: false });
+                const msg = `✔ Guardado: ${data.filename}  (${data.size_mb} MB · ${data.duration_s}s · ${data.frames_written}f)`;
+                setRecMsg({ ok: true, text: msg });
+                log('success', `🟥 REC detenida → ${data.path}  [${data.size_mb} MB, ${data.duration_s}s]`);
+                setVideoGallery(prev => [{
+                    filename: data.filename,
+                    path: data.path,
+                    size_mb: data.size_mb,
+                    duration_s: data.duration_s,
+                    time,
+                }, ...(prev ?? []).slice(0, 7)]);
+                if (videoFilename.trim()) setVideoFilename('');
+            } else {
+                setRecMsg({ ok: false, text: `✖ ${data.error}` });
+            }
+        } catch (e) {
+            setIsRecording(false);
+            setRecMsg({ ok: false, text: '✖ Error al detener la grabación' });
+        }
+    };
+
+    // ── Zoom con rueda del ratón ────────────────────────────────────────────────
+    const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? -0.1 : 0.1;
+        setZoomLevel(prev => Math.min(8, Math.max(1, parseFloat((prev + delta).toFixed(2)))));
+        // Si volvemos a zoom 1 reset pan
+        if (zoomLevel + delta <= 1) setPanOffset({ x: 0, y: 0 });
+    };
+
+    const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+        if (zoomLevel <= 1) return;
+        setIsPanning(true);
+        panStart.current = { mx: e.clientX, my: e.clientY, px: panOffset.x, py: panOffset.y };
+    };
+
+    const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+        if (!isPanning) return;
+        const dx = e.clientX - panStart.current.mx;
+        const dy = e.clientY - panStart.current.my;
+        setPanOffset({ x: panStart.current.px + dx, y: panStart.current.py + dy });
+    };
+
+    const handleMouseUp = () => setIsPanning(false);
+
+    const zoomReset = () => { setZoomLevel(1); setPanOffset({ x: 0, y: 0 }); };
+    const zoomIn = () => setZoomLevel(prev => Math.min(8, parseFloat((prev + 0.25).toFixed(2))));
+    const zoomOut = () => { const nv = Math.max(1, parseFloat((zoomLevel - 0.25).toFixed(2))); setZoomLevel(nv); if (nv <= 1) setPanOffset({ x: 0, y: 0 }); };
 
     // ── Desconexión ──────────────────────────────────────────────────────────────
     const handleDisconnect = async () => {
@@ -986,30 +1145,240 @@ ${tlConfig.enablePersistentIp ? `
                             <button className="basler-btn disconnect small" onClick={handleDisconnect}>⏹ StopGrabbing</button>
                         </div>
 
-                        {/* MJPEG real desde camera_server.py */}
-                        {backendOk ? (
-                            <img
-                                key={streamKey}
-                                src={`http://127.0.0.1:8765/api/stream?t=${streamKey}`}
-                                alt="Basler MJPEG Stream"
-                                className="basler-preview-canvas"
-                                style={{ background: '#000', border: '2px solid #00ff6440' }}
-                                onError={() => log('error', 'Error cargando stream MJPEG — ¿está camera_server.py en ejecución?')}
-                            />
-                        ) : (
-                            /* Canvas simulado — sin backend */
-                            <canvas ref={canvasRef} width={640} height={400} className="basler-preview-canvas" />
-                        )}
+                        {/* LAYOUT: stream + panel captura */}
+                        <div className="preview-main-layout">
 
-                        <div className="preview-metrics">
-                            <div className="metric-chip">{backendOk ? '✔ camera_server.py' : '⚠ Simulado'}</div>
-                            <div className="metric-chip">{config.pixelFormat}</div>
-                            <div className="metric-chip">Exp: {config.exposureTimeAbs.toLocaleString()} µs</div>
-                            <div className="metric-chip">Gain: {config.gainRaw} raw</div>
-                            <div className="metric-chip">{backendOk ? `${serverFps} fps` : `${config.acquisitionFrameRateAbs.toFixed(1)} fps`}</div>
-                            <div className="metric-chip">IP: {selected?.ipAddress ?? '192.168.0.201'}</div>
-                            <div className="metric-chip">{config.transmissionType}</div>
-                        </div>
+                            {/* ── Video stream ─────────────────────────────────── */}
+                            <div className="preview-stream-col">
+
+                                {/* Barra de zoom */}
+                                <div className="zoom-bar">
+                                    <button className="zoom-btn" onClick={zoomOut} title="Alejar">−</button>
+                                    <input
+                                        type="range" min={1} max={8} step={0.05}
+                                        value={zoomLevel}
+                                        className="zoom-slider"
+                                        onChange={e => {
+                                            const nv = parseFloat(e.target.value);
+                                            setZoomLevel(nv);
+                                            if (nv <= 1) setPanOffset({ x: 0, y: 0 });
+                                        }}
+                                    />
+                                    <button className="zoom-btn" onClick={zoomIn} title="Acercar">+</button>
+                                    <span className="zoom-label">{Math.round(zoomLevel * 100)}%</span>
+                                    {zoomLevel > 1 && (
+                                        <button className="zoom-btn zoom-reset" onClick={zoomReset} title="Reset zoom">⊙</button>
+                                    )}
+                                    <button
+                                        className="zoom-btn panel-toggle-btn"
+                                        onClick={() => setPanelOpen(o => !o)}
+                                        title={panelOpen ? 'Ocultar panel' : 'Mostrar panel'}
+                                        style={{ marginLeft: 'auto' }}
+                                    >
+                                        {panelOpen ? '⟩' : '⟨'}
+                                    </button>
+                                </div>
+
+                                {/* Contenedor del stream con zoom/pan */}
+                                <div
+                                    ref={streamWrapRef}
+                                    className="stream-zoom-wrap"
+                                    onWheel={handleWheel}
+                                    onMouseDown={handleMouseDown}
+                                    onMouseMove={handleMouseMove}
+                                    onMouseUp={handleMouseUp}
+                                    onMouseLeave={handleMouseUp}
+                                    style={{ cursor: zoomLevel > 1 ? (isPanning ? 'grabbing' : 'grab') : 'default' }}
+                                >
+                                    {backendOk ? (
+                                        <img
+                                            key={streamKey}
+                                            src={`http://127.0.0.1:8765/api/stream?t=${streamKey}`}
+                                            alt="Basler MJPEG Stream"
+                                            className="stream-zoom-img"
+                                            draggable={false}
+                                            style={{
+                                                transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
+                                                transformOrigin: 'center center',
+                                            }}
+                                            onError={() => log('error', 'Error cargando stream MJPEG')}
+                                        />
+                                    ) : (
+                                        <canvas
+                                            ref={canvasRef} width={640} height={400}
+                                            className="stream-zoom-img"
+                                            style={{
+                                                transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
+                                                transformOrigin: 'center center',
+                                            }}
+                                        />
+                                    )}
+
+                                    {/* Indicador de zoom flotante */}
+                                    {zoomLevel > 1 && (
+                                        <div className="zoom-overlay-badge">
+                                            🔍 {Math.round(zoomLevel * 100)}%
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Chips de métricas debajo del stream */}
+                                <div className="preview-metrics">
+                                    <div className="metric-chip">{backendOk ? '✔ camera_server.py' : '⚠ Simulado'}</div>
+                                    <div className="metric-chip">{config.pixelFormat}</div>
+                                    <div className="metric-chip">Exp: {config.exposureTimeAbs.toLocaleString()} µs</div>
+                                    <div className="metric-chip">Gain: {config.gainRaw} raw</div>
+                                    <div className="metric-chip">{backendOk ? `${serverFps} fps` : `${config.acquisitionFrameRateAbs.toFixed(1)} fps`}</div>
+                                    <div className="metric-chip">IP: {selected?.ipAddress ?? '192.168.0.201'}</div>
+                                </div>
+                            </div>
+
+                            {/* ── Panel de captura + grabación (colapsable) ────────── */}
+                            {panelOpen && (<div className="capture-panel">
+                                <div className="capture-panel-title">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#00ff64" strokeWidth="1.8">
+                                        <circle cx="12" cy="12" r="4" />
+                                        <path d="M20.94 13A9 9 0 1 1 11 3.06" />
+                                        <path d="M2 8h2M4 4l2 2M8 2v2" />
+                                    </svg>
+                                    Captura de Imagen
+                                </div>
+
+                                <div className="capture-field">
+                                    <label>📁 Directorio de fotos</label>
+                                    <input id="save-dir-input" className="basler-input capture-input"
+                                        placeholder="Ej: C:\Fotos_Basler" value={saveDir}
+                                        onChange={e => setSaveDir(e.target.value)} spellCheck={false} />
+                                    <span className="basler-hint">Se crea si no existe.</span>
+                                </div>
+
+                                <div className="capture-field">
+                                    <label>🏷 Nombre archivo (opcional)</label>
+                                    <input id="filename-input" className="basler-input capture-input"
+                                        placeholder="Auto: basler_SN_YYYYMMDD_HHMMSS.jpg"
+                                        value={customFilename} onChange={e => setCustomFilename(e.target.value)}
+                                        spellCheck={false} />
+                                </div>
+
+                                <button id="capture-btn"
+                                    className={`basler-btn capture-btn ${capturing ? 'loading' : ''}`}
+                                    onClick={handleSnapshot}
+                                    disabled={capturing || !isConnected || !backendOk}>
+                                    {capturing ? <><span className="spin">↻</span> Guardando…</> : '📸 Tomar Foto'}
+                                </button>
+
+                                {captureMsg && <div className={`capture-result ${captureMsg.ok ? 'ok' : 'err'}`}>{captureMsg.text}</div>}
+
+                                {/* Galería fotos */}
+                                {gallery && gallery.length > 0 && (
+                                    <div className="capture-gallery">
+                                        <div className="capture-gallery-title">📂 Fotos ({gallery.length})</div>
+                                        {gallery.map((g, i) => (
+                                            <div key={i} className="capture-gallery-item">
+                                                <div className="gallery-item-info">
+                                                    <span className="gallery-filename">{g.filename}</span>
+                                                    <span className="gallery-meta">{g.size_kb} KB · {g.time}</span>
+                                                </div>
+                                                <div className="gallery-item-path" title={g.path}>{g.path}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {/* ═══ DIVIDER ═══ */}
+                                <div className="capture-divider" />
+
+                                {/* ═══ SECCIÓN VÍDEO ═══ */}
+                                <div className="capture-panel-title" style={{ color: isRecording ? '#ff4444' : '#e6edf3' }}>
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                                        stroke={isRecording ? '#ff4444' : '#ff6b6b'} strokeWidth="1.8">
+                                        <polygon points="23 7 16 12 23 17 23 7" />
+                                        <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                                    </svg>
+                                    {isRecording
+                                        ? <span className="rec-blink">● REC {Math.floor(recElapsed / 60).toString().padStart(2, '0')}:{(recElapsed % 60).toString().padStart(2, '0')}  ·  {recFrames}f</span>
+                                        : 'Grabar Vídeo'
+                                    }
+                                </div>
+
+                                <div className="capture-field">
+                                    <label>📁 Directorio de vídeos</label>
+                                    <input id="video-dir-input" className="basler-input capture-input"
+                                        placeholder="Ej: C:\Videos_Basler" value={videoDir}
+                                        onChange={e => setVideoDir(e.target.value)}
+                                        disabled={isRecording} spellCheck={false} />
+                                    <span className="basler-hint">Se crea si no existe.</span>
+                                </div>
+
+                                <div className="capture-field">
+                                    <label>🏷 Nombre vídeo (opcional)</label>
+                                    <input id="video-filename-input" className="basler-input capture-input"
+                                        placeholder="Auto: basler_SN_YYYYMMDD_HHMMSS.avi"
+                                        value={videoFilename} onChange={e => setVideoFilename(e.target.value)}
+                                        disabled={isRecording} spellCheck={false} />
+                                </div>
+
+                                <div className="rec-options-row">
+                                    <div className="capture-field" style={{ flex: 1 }}>
+                                        <label>FPS</label>
+                                        <select className="basler-input capture-input"
+                                            value={videoFps} onChange={e => setVideoFps(Number(e.target.value))}
+                                            disabled={isRecording}>
+                                            {[5, 10, 15, 20, 25, 30].map(f => <option key={f} value={f}>{f} fps</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="capture-field" style={{ flex: 1 }}>
+                                        <label>Codec</label>
+                                        <select className="basler-input capture-input"
+                                            value={videoCodec} onChange={e => setVideoCodec(e.target.value as 'MJPG' | 'mp4v')}
+                                            disabled={isRecording}>
+                                            <option value="MJPG">MJPG (.avi)</option>
+                                            <option value="mp4v">MP4V (.mp4)</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                {!isRecording ? (
+                                    <button id="rec-start-btn"
+                                        className="basler-btn rec-btn"
+                                        onClick={handleRecordStart}
+                                        disabled={!isConnected || !backendOk}>
+                                        ● Iniciar Grabación
+                                    </button>
+                                ) : (
+                                    <button id="rec-stop-btn"
+                                        className="basler-btn rec-stop-btn"
+                                        onClick={handleRecordStop}>
+                                        ⏹ Detener Grabación
+                                    </button>
+                                )}
+
+                                {recMsg && <div className={`capture-result ${recMsg.ok ? 'ok' : 'err'}`}>{recMsg.text}</div>}
+
+                                {/* Galería vídeos */}
+                                {videoGallery && videoGallery.length > 0 && (
+                                    <div className="capture-gallery">
+                                        <div className="capture-gallery-title">🎬 Vídeos ({videoGallery.length})</div>
+                                        {videoGallery.map((v, i) => (
+                                            <div key={i} className="capture-gallery-item">
+                                                <div className="gallery-item-info">
+                                                    <span className="gallery-filename">{v.filename}</span>
+                                                    <span className="gallery-meta">{v.size_mb} MB · {v.duration_s}s</span>
+                                                </div>
+                                                <div className="gallery-item-path" title={v.path}>{v.path}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {/* Aviso si no hay backend */}
+                                {!backendOk && (
+                                    <div className="capture-result err">⚠ Necesitas camera_server.py activo.</div>
+                                )}
+
+                            </div>)}{/* /capture-panel */}
+                        </div>{/* /preview-main-layout */}
+
                     </div>
                 )}
 

@@ -22,7 +22,7 @@ import threading
 import io
 import struct
 import traceback
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 # ── Intentar importar pypylon ────────────────────────────────────────────────
@@ -33,6 +33,7 @@ try:
     PYLON_AVAILABLE = True
     print("[INFO] pypylon detectado — modo REAL activado")
 except ImportError:
+    import cv2
     PYLON_AVAILABLE = False
     import numpy as np
     print("[WARN] pypylon NO instalado — modo SIMULADO activado")
@@ -55,6 +56,140 @@ current_camera = None          # pypylon InstantCamera instance
 current_frame = None           # numpy array BGR
 last_frame_time = time.time()
 frame_lock = threading.Lock()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Estado y funciones de grabación de vídeo
+# ════════════════════════════════════════════════════════════════════════════
+
+recorder_state = {
+    "recording": False,
+    "path": "",
+    "filename": "",
+    "start_time": 0.0,
+    "frames_written": 0,
+    "fps": 10.0,
+    "error": "",
+}
+recorder_lock = threading.Lock()
+_video_writer = None          # cv2.VideoWriter instance
+_recorder_thread = None
+
+
+def start_recording(params: dict) -> dict:
+    """Inicia la grabación de vídeo en un hilo dedicado."""
+    global _video_writer, _recorder_thread
+
+    import os
+    save_dir  = params.get("dir", "C:\\Videos_Basler")
+    filename  = params.get("filename", "")
+    fps_rec   = float(params.get("fps", 10.0))
+    codec     = params.get("codec", "MJPG")   # MJPG → .avi  |  mp4v → .mp4
+
+    # Extensión según codec
+    ext = ".mp4" if codec.lower() in ("mp4v", "h264", "avc1") else ".avi"
+
+    if not filename:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        sn = camera_state.get("serial", "cam") or "cam"
+        filename = f"basler_{sn}_{ts}{ext}"
+    elif not (filename.lower().endswith(".avi") or filename.lower().endswith(".mp4")):
+        filename += ext
+
+    # Crear directorio
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+    except Exception as e:
+        return {"ok": False, "error": f"No se pudo crear directorio: {e}"}
+
+    save_path = os.path.join(save_dir, filename)
+
+    # Tamaño del frame actual
+    with frame_lock:
+        frame_sample = current_frame
+    if frame_sample is None:
+        # Frame negro de referencia
+        frame_sample = np.zeros((1200, 1920, 3), dtype=np.uint8)
+
+    h, w = frame_sample.shape[:2]
+
+    fourcc = cv2.VideoWriter_fourcc(*codec)
+    writer = cv2.VideoWriter(save_path, fourcc, fps_rec, (w, h))
+    if not writer.isOpened():
+        # Fallback: intentar con MJPG
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+        filename_avi = os.path.splitext(filename)[0] + ".avi"
+        save_path    = os.path.join(save_dir, filename_avi)
+        filename     = filename_avi
+        writer = cv2.VideoWriter(save_path, fourcc, fps_rec, (w, h))
+        if not writer.isOpened():
+            return {"ok": False, "error": "No se pudo abrir VideoWriter (OpenCV)"}
+
+    with recorder_lock:
+        recorder_state.update({
+            "recording": True,
+            "path": save_path,
+            "filename": filename,
+            "start_time": time.time(),
+            "frames_written": 0,
+            "fps": fps_rec,
+            "error": "",
+        })
+    _video_writer = writer
+
+    # Hilo de escritura de frames
+    def _write_loop():
+        global _video_writer
+        delay = 1.0 / fps_rec
+        print(f"[INFO] Grabación iniciada → {save_path}  @{fps_rec}fps")
+        while True:
+            with recorder_lock:
+                if not recorder_state["recording"]:
+                    break
+            with frame_lock:
+                frame = current_frame
+            if frame is not None:
+                # Resize si el frame no coincide con el tamaño del writer
+                if frame.shape[0] != h or frame.shape[1] != w:
+                    frame = cv2.resize(frame, (w, h))
+                if _video_writer and _video_writer.isOpened():
+                    _video_writer.write(frame)
+                    with recorder_lock:
+                        recorder_state["frames_written"] += 1
+            time.sleep(delay)
+        if _video_writer:
+            _video_writer.release()
+            _video_writer = None
+        print(f"[INFO] Grabación detenida → {save_path}")
+
+    _recorder_thread = threading.Thread(target=_write_loop, daemon=True)
+    _recorder_thread.start()
+    return {"ok": True, "path": save_path, "filename": filename, "fps": fps_rec}
+
+
+def stop_recording() -> dict:
+    """Detiene la grabación y cierra el VideoWriter."""
+    with recorder_lock:
+        if not recorder_state["recording"]:
+            return {"ok": False, "error": "No hay grabación activa"}
+        recorder_state["recording"] = False
+        path    = recorder_state["path"]
+        fname   = recorder_state["filename"]
+        nframes = recorder_state["frames_written"]
+        elapsed = time.time() - recorder_state["start_time"]
+    # Esperar a que el hilo cierre el writer
+    if _recorder_thread:
+        _recorder_thread.join(timeout=3)
+    import os
+    size_mb = round(os.path.getsize(path) / (1024 * 1024), 2) if os.path.exists(path) else 0
+    return {
+        "ok": True,
+        "path": path,
+        "filename": fname,
+        "frames_written": nframes,
+        "duration_s": round(elapsed, 1),
+        "size_mb": size_mb,
+    }
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -325,7 +460,6 @@ def get_jpeg_frame(quality=80):
         cv2.putText(frame, "Sin señal — conecta la cámara", (80, 200),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (60, 60, 60), 2)
     try:
-        import cv2
         ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
         if ret:
             return bytes(buf)
@@ -385,7 +519,7 @@ class CameraHandler(BaseHTTPRequestHandler):
                         self.wfile.write(header + jpg + b"\r\n")
                         self.wfile.flush()
                     time.sleep(1.0 / 25)  # max 25fps stream al browser
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass  # cliente desconectado
 
         # ── /api/snapshot
@@ -397,6 +531,93 @@ class CameraHandler(BaseHTTPRequestHandler):
             self.send_cors()
             self.end_headers()
             self.wfile.write(jpg)
+
+        # ── /api/snapshot_save — Guarda foto en disco
+        elif path == "/api/snapshot_save":
+            import os
+            query = parse_qs(parsed.query)
+            save_dir = query.get("dir", [""])[0]
+            custom_name = query.get("filename", [""])[0]
+
+            if not save_dir:
+                self._json_response({"ok": False, "error": "Falta el parámetro 'dir'"})
+                return
+
+            # Crear directorio si no existe
+            try:
+                os.makedirs(save_dir, exist_ok=True)
+            except Exception as e:
+                self._json_response({"ok": False, "error": f"No se pudo crear el directorio: {e}"})
+                return
+
+            # Nombre automático con timestamp
+            if not custom_name:
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                sn = camera_state.get("serial", "cam") or "cam"
+                custom_name = f"basler_{sn}_{ts}.jpg"
+            elif not custom_name.lower().endswith(".jpg"):
+                custom_name += ".jpg"
+
+            save_path = os.path.join(save_dir, custom_name)
+
+            jpg = get_jpeg_frame(quality=95)
+            if not jpg:
+                self._json_response({"ok": False, "error": "Sin frame disponible. ¿Está la cámara conectada?"})
+                return
+
+            try:
+                with open(save_path, "wb") as f:
+                    f.write(jpg)
+                print(f"[INFO] Foto guardada: {save_path}")
+                self._json_response({
+                    "ok": True,
+                    "path": save_path,
+                    "filename": custom_name,
+                    "size_kb": round(len(jpg) / 1024, 1),
+                })
+            except Exception as e:
+                self._json_response({"ok": False, "error": f"Error al guardar: {e}"})
+
+        # ── /api/record/status
+        elif path == "/api/record/status":
+            with recorder_lock:
+                state_copy = dict(recorder_state)
+            if state_copy["recording"]:
+                state_copy["elapsed_s"] = round(time.time() - state_copy["start_time"], 1)
+            else:
+                state_copy["elapsed_s"] = 0
+            self._json_response(state_copy)
+
+        # ── /api/scan_plc
+        elif path == "/api/scan_plc":
+            query = parse_qs(parsed.query)
+            ip = query.get("ip", [""])[0]
+            port = int(query.get("port", ["9600"])[0])
+            if ip:
+                import socket
+                import os
+                import platform
+                
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(0.5)
+                tcp_open = (sock.connect_ex((ip, port)) == 0)
+                sock.close()
+                
+                param = '-n' if platform.system().lower() == 'windows' else '-c'
+                cmd = f"ping {param} 1 -w 500 {ip} > nul 2>&1" if platform.system().lower() == 'windows' else f"ping {param} 1 -W 1 {ip} > /dev/null 2>&1"
+                alive = (os.system(cmd) == 0)
+                
+                self.send_response(200)
+                self.send_cors()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True, "ip": ip, "alive": alive, "tcp_open": tcp_open}).encode())
+            else:
+                self.send_response(400)
+                self.send_cors()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": False, "error": "No IP"}')
 
         else:
             self.send_response(404)
@@ -415,6 +636,21 @@ class CameraHandler(BaseHTTPRequestHandler):
         # ── /api/connect
         if path == "/api/connect":
             result = connect_camera(params)
+            self._json_response(result)
+
+        # ── /api/record/start
+        elif path == "/api/record/start":
+            with recorder_lock:
+                already = recorder_state["recording"]
+            if already:
+                self._json_response({"ok": False, "error": "Ya hay una grabación activa"})
+                return
+            result = start_recording(params)
+            self._json_response(result)
+
+        # ── /api/record/stop
+        elif path == "/api/record/stop":
+            result = stop_recording()
             self._json_response(result)
 
         # ── /api/disconnect
@@ -465,24 +701,10 @@ if __name__ == "__main__":
             print("\n[ERROR] opencv-python no instalado.")
             print("  Instala con:  pip install opencv-python\n")
 
-    server = HTTPServer(("0.0.0.0", PORT), CameraHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), CameraHandler)
     print(f"\n[INFO] Servidor escuchando en puerto {PORT}...")
-    
-    # Auto-conectar en el arranque
-    print("[INFO] Intentando auto-conectar cámara...")
-    connect_camera({
-        "connectionMode": "auto",
-        "ipAddress": "192.168.0.201",
-        "pixelFormat": "Mono8",
-        "width": 1920,
-        "height": 1200,
-        "exposureAuto": "Off",
-        "exposureTimeAbs": 10000,
-        "gainAuto": "Off",
-        "gainRaw": 136,
-    })
-
-    print("[INFO] Presiona Ctrl+C para detener.\n")
+    print("[INFO] Presiona Ctrl+C para detener.")
+    print("[INFO] Conecta la cámara desde la interfaz web.\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
