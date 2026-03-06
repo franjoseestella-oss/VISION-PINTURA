@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import './App.css';
 import logisnextLogo from '../Imagenes/logo.PNG';
 import florcliftImage from '../Imagenes/FLORCLIFT_XL.PNG';
+import norwayFlag from '../Imagenes/bandera.PNG';
 import { getChatResponse } from './services/gemini';
 import PlcConfig from './PlcConfig';
 import BaslerCamera from './BaslerCamera';
+import { useTranslation } from './i18n';
 
 interface Detection {
   id: number;
@@ -17,8 +19,6 @@ interface Detection {
   color: string;
 }
 
-
-
 interface VideoMapping {
   id: string;
   label: string;
@@ -30,12 +30,16 @@ interface ChatMessage {
   text: string;
 }
 
+
 function App() {
+  const { t, language, setLanguage } = useTranslation();
   const [activeTab, setActiveTab] = useState<'live' | 'mapping' | 'chat' | 'plc' | 'camera'>('live');
   const [fps, setFps] = useState(0);
   const [confidenceAvg, setConfidenceAvg] = useState(94);
   const [modelActive, setModelActive] = useState(true);
   const [cameraEnabled, setCameraEnabled] = useState(false);
+
+
 
   const [mappings, setMappings] = useState<VideoMapping[]>([
     { id: '1', label: 'Montacargas', videoFile: 'Bastidores.mp4' },
@@ -161,11 +165,31 @@ function App() {
           <img src={logisnextLogo} alt="Logisnext Logo" className="logo-image" />
         </div>
         <div className="nav-links">
-          <button className={`nav-btn ${activeTab === 'live' ? 'active' : ''}`} onClick={() => setActiveTab('live')}>Live Inference</button>
-          <button className={`nav-btn ${activeTab === 'camera' ? 'active' : ''}`} onClick={() => setActiveTab('camera')}>📷 Basler Camera</button>
-          <button className={`nav-btn ${activeTab === 'mapping' ? 'active' : ''}`} onClick={() => setActiveTab('mapping')}>Video Mapping</button>
-          <button className={`nav-btn ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>AI Assistant</button>
-          <button className={`nav-btn ${activeTab === 'plc' ? 'active' : ''}`} onClick={() => setActiveTab('plc')}>🏭 PLC OMRON</button>
+          <button className={`nav-btn ${activeTab === 'live' ? 'active' : ''}`} onClick={() => setActiveTab('live')}>{t('liveInference')}</button>
+          <button className={`nav-btn ${activeTab === 'camera' ? 'active' : ''}`} onClick={() => setActiveTab('camera')}>{t('camera')}</button>
+          <button className={`nav-btn ${activeTab === 'mapping' ? 'active' : ''}`} onClick={() => setActiveTab('mapping')}>{t('mapping')}</button>
+          <button className={`nav-btn ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>{t('chat')}</button>
+          <button className={`nav-btn ${activeTab === 'plc' ? 'active' : ''}`} onClick={() => setActiveTab('plc')}>{t('plc')}</button>
+        </div>
+        <div className="nav-right" style={{ display: 'flex', alignItems: 'center', marginLeft: '16px', gap: '16px' }}>
+          <img
+            src={norwayFlag}
+            alt="Norway Flag"
+            title={t('switchLangTip')}
+            onClick={() => setLanguage(language === 'es' ? 'no' : 'es')}
+            style={{
+              height: '32px',
+              borderRadius: '4px',
+              objectFit: 'cover',
+              border: language === 'no' ? '2px solid var(--primary-color)' : '1px solid rgba(255,255,255,0.2)',
+              boxShadow: language === 'no' ? '0 0 10px var(--primary-color)' : '0 2px 4px rgba(0,0,0,0.3)',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              opacity: language === 'no' ? 1 : 0.7
+            }}
+            onMouseOver={(e) => e.currentTarget.style.opacity = '1'}
+            onMouseOut={(e) => e.currentTarget.style.opacity = language === 'no' ? '1' : '0.7'}
+          />
         </div>
       </nav>
 
@@ -198,18 +222,18 @@ function App() {
                 <div className="video-controls-overlay">
                   <div className={`status-indicator ${cameraEnabled ? 'live' : ''}`} style={{ backgroundColor: cameraEnabled ? 'rgba(0,0,0,0.6)' : 'rgba(255,149,0,0.8)' }}>
                     {cameraEnabled ? <span className="dot pulse"></span> : <span style={{ marginRight: 8 }}>⚠️</span>}
-                    {cameraEnabled ? 'CAM1 - LIVE STREAM' : 'CAM1 - OFFLINE (FLORCLIFT)'}
+                    {cameraEnabled ? t('camLive') : t('camOffline')}
                   </div>
                   <div style={{ display: 'flex', gap: '8px' }}>
                     <div className="model-toggle">
-                      <span>Camera: {cameraEnabled ? 'ON' : 'OFF'}</span>
+                      <span>{cameraEnabled ? t('camOn') : t('camOff')}</span>
                       <label className="switch">
                         <input type="checkbox" checked={cameraEnabled} onChange={(e) => setCameraEnabled(e.target.checked)} />
                         <span className="slider round"></span>
                       </label>
                     </div>
                     <div className="model-toggle">
-                      <span>Model: {modelActive ? 'ACTIVE' : 'PAUSED'}</span>
+                      <span>{modelActive ? t('modelActive') : t('modelPaused')}</span>
                       <label className="switch">
                         <input type="checkbox" checked={modelActive} onChange={(e) => setModelActive(e.target.checked)} />
                         <span className="slider round"></span>
@@ -219,8 +243,8 @@ function App() {
                 </div>
                 {!modelActive && (
                   <div className="paused-overlay">
-                    <h2>INFERENCE PAUSED</h2>
-                    <p>Waiting for model reactivaton...</p>
+                    <h2>{t('infPaused')}</h2>
+                    <p>{t('waitingReactivation')}</p>
                   </div>
                 )}
               </div>
@@ -232,12 +256,12 @@ function App() {
               {activePlaybackUrl && (
                 <div className="playback-section" style={{ marginBottom: '24px' }}>
                   <div className="alerts-header">
-                    <h2>Video Reference Triggred</h2>
+                    <h2>{t('vidRefTriggered')}</h2>
                     <button
                       onClick={() => setActivePlaybackUrl(null)}
                       style={{ background: 'none', border: 'none', color: '#ff3b30', cursor: 'pointer', fontWeight: 'bold' }}
                     >
-                      Close
+                      {t('close')}
                     </button>
                   </div>
                   <video
@@ -252,16 +276,16 @@ function App() {
 
               <div className="telemetry-cards">
                 <div className="telemetry-card">
-                  <h3>System FPS</h3>
+                  <h3>{t('sysFps')}</h3>
                   <div className="val">{fps} <span className="unit">fps</span></div>
                 </div>
                 <div className="telemetry-card">
-                  <h3>Avg Confidence</h3>
+                  <h3>{t('avgConf')}</h3>
                   <div className="val">{confidenceAvg} <span className="unit">%</span></div>
                 </div>
                 <div className="telemetry-card connection">
-                  <h3>Roboflow Server</h3>
-                  <div className="status-badge connected">Connected</div>
+                  <h3>{t('roboflowServer')}</h3>
+                  <div className="status-badge connected">{t('connected')}</div>
                 </div>
               </div>
 
@@ -276,14 +300,14 @@ function App() {
         ) : activeTab === 'mapping' ? (
           <div className="mapping-container">
             <div className="mapping-header">
-              <h2>Video Mapping Configuration</h2>
-              <p>Asocia las clases detectadas por la cámara a archivos de la carpeta "videos". Cuando se detecte esa clase, el video se reproducirá automáticamente en la pantalla principal.</p>
+              <h2>{t('mapConfig')}</h2>
+              <p>{t('mapDesc')}</p>
             </div>
             <div className="mapping-grid">
               {mappings.map(map => (
                 <div key={map.id} className="mapping-card">
                   <div className="mapping-field">
-                    <label>Clase/Referencia Detectada</label>
+                    <label>{t('classDet')}</label>
                     <input
                       type="text"
                       value={map.label}
@@ -292,7 +316,7 @@ function App() {
                     />
                   </div>
                   <div className="mapping-field">
-                    <label>Archivo de Vídeo</label>
+                    <label>{t('vidFile')}</label>
                     <input
                       type="text"
                       value={map.videoFile}
@@ -306,21 +330,21 @@ function App() {
                 className="add-mapping-btn"
                 onClick={() => setMappings([...mappings, { id: Date.now().toString(), label: '', videoFile: '' }])}
               >
-                + Añadir Nueva Asociación
+                {t('addMap')}
               </button>
             </div>
           </div>
         ) : activeTab === 'chat' ? (
           <div className="chat-container">
             <div className="chat-header">
-              <h2>MLESA Quality Control Assistant</h2>
-              <p>Habla con Roboflow y Gemini para asistir en el ensamblaje EDiA 50 y entender métricas logísticas.</p>
+              <h2>{t('chatTitle')}</h2>
+              <p>{t('chatDesc')}</p>
             </div>
             <div className="chat-messages-area">
               {chatMessages.length === 0 && (
                 <div className="chat-empty">
-                  <h3>¿En qué puedo ayudarte hoy?</h3>
-                  <p>Pregúntame sobre el historial de detecciones críticas, manuales de operario o conexión a Roboflow.</p>
+                  <h3>{t('chatHelp')}</h3>
+                  <p>{t('chatHelpSub')}</p>
                 </div>
               )}
               {chatMessages.map((msg, idx) => (
@@ -341,7 +365,7 @@ function App() {
             <div className="chat-input-area">
               <input
                 type="text"
-                placeholder="Escribe tu mensaje..."
+                placeholder={t('placeholder')}
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={(e) => {
@@ -354,7 +378,7 @@ function App() {
                       setChatMessages(prev => [...prev, { role: 'model', text: reply || '' }]);
                       setIsChatLoading(false);
                     }).catch(err => {
-                      setChatMessages(prev => [...prev, { role: 'model', text: 'Error procesando la solicitud: ' + String(err) }]);
+                      setChatMessages(prev => [...prev, { role: 'model', text: t('errReq') + String(err) }]);
                       setIsChatLoading(false);
                     });
                   }
@@ -371,12 +395,12 @@ function App() {
                     setChatMessages(prev => [...prev, { role: 'model', text: reply || '' }]);
                     setIsChatLoading(false);
                   }).catch(err => {
-                    setChatMessages(prev => [...prev, { role: 'model', text: 'Error procesando la solicitud: ' + String(err) }]);
+                    setChatMessages(prev => [...prev, { role: 'model', text: t('errReq') + String(err) }]);
                     setIsChatLoading(false);
                   });
                 }}
               >
-                Enviar
+                {t('send')}
               </button>
             </div>
           </div>

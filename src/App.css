@@ -3221,7 +3221,60 @@ input:checked+.slider:before {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  max-height: 100%;
+  overflow-y: auto;
 }
+
+.capture-panel::-webkit-scrollbar {
+  width: 6px;
+}
+
+.capture-panel::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 10px 0;
+}
+
+.capture-panel::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 6px;
+}
+
+.capture-panel::-webkit-scrollbar-thumb:hover {
+  background: #484f58;
+}
+
+/* ── Selector de tipo (Mastil / Bastidor) ───────────── */
+.target-selector {
+  display: flex;
+  background: #0d1117;
+  border-radius: 6px;
+  border: 1px solid #30363d;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+.target-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  font-weight: 700;
+  font-size: 0.8rem;
+  padding: 8px 0;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.target-btn:hover {
+  color: #c9d1d9;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.target-btn.active {
+  background: #238636;
+  color: #fff;
+}
+
 
 .capture-panel-title {
   display: flex;

@@ -1,4 +1,3 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
@@ -50,10 +49,10 @@ export const analyzeImageWithLabels = async (base64Data: string, mimeType: strin
     }
   });
 
-  return JSON.parse(response.text);
+  return JSON.parse(response.text || "{}");
 };
 
-export const getChatResponse = async (history: { role: string; text: string }[], message: string) => {
+export const getChatResponse = async (_history: { role: string; text: string }[], message: string) => {
   const ai = new GoogleGenAI({ apiKey: API_KEY });
   const chat = ai.chats.create({
     model: "gemini-3-pro-preview",

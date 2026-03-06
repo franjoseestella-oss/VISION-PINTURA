@@ -50,10 +50,15 @@ def main():
     try:
         # ── 1. Arrancar camera_server.py ─────────────────────────
         cam_script = os.path.join(SCRIPT_DIR, 'camera_server.py')
+        
+        # Use .venv python if it exists
+        venv_python = os.path.join(SCRIPT_DIR, '.venv', 'Scripts', 'python.exe')
+        python_exe = venv_python if os.path.exists(venv_python) else sys.executable
+        
         if os.path.exists(cam_script):
-            print("\n[INFO] Arrancando camera_server.py (puerto 8765)...")
+            print(f"\n[INFO] Arrancando camera_server.py (puerto 8765) con {python_exe}...")
             camera_proc = subprocess.Popen(
-                [sys.executable, cam_script],
+                [python_exe, cam_script],
                 cwd=SCRIPT_DIR,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

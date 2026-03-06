@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useTranslation } from './i18n';
 
 // ─── Tipos reales basados en BaslerCameraCameraParams.h (acA1920-48gm) ────────
 
@@ -121,6 +122,7 @@ const DEFAULT_CONFIG: CameraConfig = {
 };
 
 export default function BaslerCamera() {
+    const { t } = useTranslation();
     const [status, setStatus] = useState<ConnectionStatus>('disconnected');
     const [devices, setDevices] = useState<BaslerDevice[]>([]);
     const [selected, setSelected] = useState<BaslerDevice | null>(null);
@@ -139,13 +141,13 @@ export default function BaslerCamera() {
     const animRef = useRef<number>(0);
     const logsEndRef = useRef<HTMLDivElement>(null);
     // ── Captura de fotos ──────────────────────────────────────────────────────
-    const [saveDir, setSaveDir] = useState('C:\\Fotos_Basler');
+    const [saveDir, setSaveDir] = useState('C:\\Users\\franj\\OneDrive\\Escritorio\\COSAS  FRAN\\PROYECTOS\\PINTURA\\ROBOTFLOW\\FOTOS\\MASTILES');
     const [customFilename, setCustomFilename] = useState('');
     const [captureMsg, setCaptureMsg] = useState<{ ok: boolean; text: string } | null>(null);
     const [capturing, setCapturing] = useState(false);
     const [gallery, setGallery] = useState<{ filename: string; path: string; size_kb: number; time: string }[]>();
     // ── Grabación de vídeo ───────────────────────────────────────────────
-    const [videoDir, setVideoDir] = useState('C:\\Videos_Basler');
+    const [videoDir, setVideoDir] = useState('C:\\Users\\franj\\OneDrive\\Escritorio\\COSAS  FRAN\\PROYECTOS\\PINTURA\\ROBOTFLOW\\VIDEOS\\MASTILES');
     const [videoFilename, setVideoFilename] = useState('');
     const [videoFps, setVideoFps] = useState(10);
     const [videoCodec, setVideoCodec] = useState<'MJPG' | 'mp4v'>('MJPG');
@@ -234,7 +236,7 @@ export default function BaslerCamera() {
             cancelAnimationFrame(animRef.current);
             return;
         }
-        let t = 0;
+        let timeVar = 0;
         let frames = 0;
         const draw = () => {
             const canvas = canvasRef.current;
@@ -251,7 +253,7 @@ export default function BaslerCamera() {
                     const i = (y * W + x) * 4;
                     const dist = Math.hypot(x - W / 2, y - H / 2);
                     const radial = Math.max(0, 1 - dist / (Math.min(W, H) * 0.44));
-                    const wave = Math.sin((x + t) * 0.022) * 20 + Math.cos((y + t * 0.7) * 0.022) * 14;
+                    const wave = Math.sin((x + timeVar) * 0.022) * 20 + Math.cos((y + timeVar * 0.7) * 0.022) * 14;
                     const noise = (Math.random() - 0.5) * 12;
                     const expFactor = Math.min(1, config.exposureTimeAbs / 50000);
                     let v = 20 + expFactor * 160 * radial + wave + noise;
@@ -267,14 +269,14 @@ export default function BaslerCamera() {
             ctx.stroke();
             ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(8, 8, 280, 96);
             ctx.fillStyle = '#ffa500'; ctx.font = 'bold 11px monospace';
-            ctx.fillText(`● SIMULADO — Sin camera_server.py`, 14, 24);
+            ctx.fillText(t('simulated'), 14, 24);
             ctx.fillStyle = '#cdd9e5'; ctx.font = '11px monospace';
             ctx.fillText(`SN:40002788  ID:10726304`, 14, 40);
             ctx.fillText(`IP: 192.168.0.201`, 14, 54);
             ctx.fillText(`Format: ${config.pixelFormat}  AOI: ${config.width}×${config.height}`, 14, 68);
             ctx.fillText(`Exp: ${config.exposureTimeAbs.toLocaleString()}µs  Gain: ${config.gainRaw}`, 14, 82);
-            ctx.fillText(`Frame#: ${frames}  (instala camera_server.py)`, 14, 96);
-            t += 0.35; frames++;
+            ctx.fillText(`Frame#: ${frames}  ${t('realInstall')}`, 14, 96);
+            timeVar += 0.35; frames++;
             animRef.current = requestAnimationFrame(draw);
         };
         const timer = setTimeout(() => draw(), 80);
@@ -303,6 +305,12 @@ export default function BaslerCamera() {
                     devs.forEach(d => log('info',
                         `  [${d.deviceType}] ${d.modelName} | SN:${d.serialNumber} | IP:${d.ipAddress} | FW:${d.firmwareVersion}`
                     ));
+
+                    // Auto connection logic
+                    log('info', 'Autoconectando a la cámara detectada...');
+                    setSelected(devs[0]);
+                    handleConnect(devs[0]);
+                    return; // Prevent setting status to disconnected
                 } else {
                     log('warn', 'No se encontraron cámaras Basler.');
                     log('info', '→ Comprueba que el cable Ethernet esté conectado.');
@@ -333,15 +341,19 @@ export default function BaslerCamera() {
     };
 
     // ── Conexión ─────────────────────────────────────────────────────────────────
-    const handleConnect = async () => {
+    const handleConnect = async (overrideCam?: BaslerDevice) => {
         setStatus('connecting'); setErrorMsg('');
-        const cam = selected ?? (devices[0] ?? null);
+        const cam = overrideCam ?? selected ?? (devices[0] ?? null);
+
+        const actIP = (overrideCam && config.connectionMode === 'auto') ? overrideCam.ipAddress : (config.ipAddress || cam?.ipAddress || '192.168.0.201');
+        const actSN = (overrideCam && config.connectionMode === 'auto') ? overrideCam.serialNumber : (config.serialNumber || cam?.serialNumber);
+
         log('info', '═════════════════════════════════════════');
         log('info', 'Creando BaslerCamera (CDeviceSpecificInstantCamera)...');
-        if (config.connectionMode === 'serial' && config.serialNumber)
-            log('info', `TlFactory::CreateFirstDevice() → SerialNumber="${config.serialNumber}"`);
-        else if (config.connectionMode === 'ip' && config.ipAddress)
-            log('info', `TlFactory::CreateFirstDevice() → IpAddress="${config.ipAddress}"`);
+        if (config.connectionMode === 'serial' && actSN)
+            log('info', `TlFactory::CreateFirstDevice() → SerialNumber="${actSN}"`);
+        else if (config.connectionMode === 'ip' && actIP)
+            log('info', `TlFactory::CreateFirstDevice() → IpAddress="${actIP}"`);
         else
             log('info', 'TlFactory::CreateFirstDevice() → auto');
 
@@ -354,8 +366,8 @@ export default function BaslerCamera() {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         connectionMode: config.connectionMode,
-                        serialNumber: config.serialNumber || cam?.serialNumber,
-                        ipAddress: config.ipAddress || cam?.ipAddress || '192.168.0.201',
+                        serialNumber: actSN,
+                        ipAddress: actIP,
                         pixelFormat: config.pixelFormat,
                         width: config.width,
                         height: config.height,
@@ -571,13 +583,13 @@ export default function BaslerCamera() {
     const isBusy = status === 'scanning' || status === 'connecting';
 
     const tabs: { id: typeof activeTab; label: string }[] = [
-        { id: 'connection', label: '🔌 Conexión' },
-        { id: 'image', label: '🖼 Imagen' },
-        { id: 'acquisition', label: '⏱ Adquisición' },
-        { id: 'trigger', label: '⚡ Trigger' },
-        { id: 'gige', label: '🌐 GigE' },
-        { id: 'transport', label: '🔗 Transport Layer' },
-        { id: 'preview', label: '📷 Live Preview' },
+        { id: 'connection', label: t('tabConn') },
+        { id: 'image', label: t('tabImage') },
+        { id: 'acquisition', label: t('tabAcq') },
+        { id: 'trigger', label: t('tabTrig') },
+        { id: 'gige', label: t('tabGigE') },
+        { id: 'transport', label: t('tabTL') },
+        { id: 'preview', label: t('tabPreview') },
     ];
 
     return (
@@ -601,7 +613,7 @@ export default function BaslerCamera() {
                     </div>
                 </div>
                 <div className="basler-status-badge" style={{ color: getStatusColor(), borderColor: getStatusColor() }}>
-                    {status === 'connected' ? '● GRABBING' : status === 'scanning' ? '◌ SCANNING' : status === 'connecting' ? '◌ OPENING' : status === 'error' ? '✖ ERROR' : '○ CLOSED'}
+                    {status === 'connected' ? t('grabbing') : status === 'scanning' ? t('scanningStatus') : status === 'connecting' ? t('opening') : status === 'error' ? t('error') : t('closed')}
                 </div>
             </div>
 
@@ -625,9 +637,9 @@ export default function BaslerCamera() {
                         {/* Dispositivos detectados */}
                         <div className="basler-panel">
                             <div className="basler-panel-header">
-                                <span>Dispositivos GigE Vision</span>
+                                <span>{t('devGigE')}</span>
                                 <button className={`basler-btn scan ${status === 'scanning' ? 'loading' : ''}`} onClick={handleScan} disabled={isBusy || isConnected}>
-                                    {status === 'scanning' ? <><span className="spin">↻</span>Escaneando…</> : '🔍 Escanear'}</button>
+                                    {status === 'scanning' ? <><span className="spin">↻</span>{t('scanningBtn')}</> : t('scanBtn')}</button>
                             </div>
 
                             {status === 'scanning' && (
@@ -646,8 +658,8 @@ export default function BaslerCamera() {
                                             <circle cx="24" cy="24" r="3" fill="#30363d" />
                                         </svg>
                                     </div>
-                                    <p>Sin cámaras detectadas</p>
-                                    <span>Haz clic en <b>Escanear</b> para enumerar dispositivos Basler en la red GigE</span>
+                                    <p>{t('noCamDesc')}</p>
+                                    <span>{t('noCamSub')}</span>
                                 </div>
                             ) : (
                                 <div className="basler-device-list">
@@ -672,19 +684,19 @@ export default function BaslerCamera() {
 
                         {/* Modo de conexión + botón */}
                         <div className="basler-panel">
-                            <div className="basler-panel-header"><span>Modo de Conexión</span></div>
+                            <div className="basler-panel-header"><span>{t('connMode')}</span></div>
 
                             <div className="basler-mode-selector">
                                 {(['auto', 'serial', 'ip'] as ConnectionMode[]).map(m => (
                                     <button key={m} className={`mode-btn ${config.connectionMode === m ? 'active' : ''}`} onClick={() => set('connectionMode', m)}>
-                                        {m === 'auto' ? '⚡ Auto' : m === 'serial' ? '🔢 Serial' : '🌐 IP'}
+                                        {m === 'auto' ? t('btnAuto') : m === 'serial' ? t('btnSerial') : t('btnIp')}
                                     </button>
                                 ))}
                             </div>
 
                             {config.connectionMode === 'serial' && (
                                 <div className="basler-form-group">
-                                    <label>Número de Serie</label>
+                                    <label>{t('serialNum')}</label>
                                     <input className="basler-input" placeholder="Ej: 40002788" value={config.serialNumber}
                                         onChange={e => set('serialNumber', e.target.value)} />
                                     <span className="basler-hint">DeviceInfo.SetSerialNumber()</span>
@@ -692,7 +704,7 @@ export default function BaslerCamera() {
                             )}
                             {config.connectionMode === 'ip' && (
                                 <div className="basler-form-group">
-                                    <label>IP Address (GigE)</label>
+                                    <label>{t('ipAddr')}</label>
                                     <input className="basler-input" placeholder="Ej: 192.168.1.101" value={config.ipAddress}
                                         onChange={e => set('ipAddress', e.target.value)} />
                                     <span className="basler-hint">DeviceInfo.SetIpAddress() → SetPersistentIpAddress()</span>
@@ -701,12 +713,12 @@ export default function BaslerCamera() {
                             {config.connectionMode === 'auto' && (
                                 <div className="basler-info-box">
                                     <strong>TlFactory::CreateFirstDevice()</strong>
-                                    <p>Conecta al primer dispositivo Basler disponible. Usa modo Serial o IP para selección explícita cuando haya múltiples cámaras.</p>
+                                    <p>{t('connInfoAuto')}</p>
                                 </div>
                             )}
 
                             <div className="basler-form-group">
-                                <label>Timeout (ms)</label>
+                                <label>{t('timeoutMs')}</label>
                                 <input className="basler-input" type="number" min={1000} max={30000} step={500}
                                     value={config.timeout} onChange={e => set('timeout', Number(e.target.value))} />
                             </div>
@@ -715,7 +727,7 @@ export default function BaslerCamera() {
 
                             {selected && (
                                 <div className="basler-selected-summary">
-                                    <span>Seleccionado:</span>
+                                    <span>{t('selectedDev')}</span>
                                     <strong>{selected.modelName}</strong>
                                     <div className="device-type-badge GigE">GigE</div>
                                 </div>
@@ -723,11 +735,11 @@ export default function BaslerCamera() {
 
                             <div className="basler-connect-actions">
                                 {!isConnected ? (
-                                    <button className="basler-btn connect" onClick={handleConnect} disabled={isBusy}>
-                                        {status === 'connecting' ? <><span className="spin">↻</span>Abriendo…</> : '⚡ Conectar Cámara'}
+                                    <button className="basler-btn connect" onClick={() => handleConnect()} disabled={isBusy}>
+                                        {status === 'connecting' ? <><span className="spin">↻</span>{t('openingBtn')}</> : t('btnConnect')}
                                     </button>
                                 ) : (
-                                    <button className="basler-btn disconnect" onClick={handleDisconnect}>⏹ StopGrabbing / Close</button>
+                                    <button className="basler-btn disconnect" onClick={handleDisconnect}>{t('btnDisconnect')}</button>
                                 )}
                             </div>
                         </div>
@@ -738,7 +750,7 @@ export default function BaslerCamera() {
                 {activeTab === 'image' && (
                     <div className="basler-section-grid basler-config-grid">
                         <div className="basler-panel">
-                            <div className="basler-panel-header"><span>PixelFormat / AOI</span></div>
+                            <div className="basler-panel-header"><span>{t('pixFormat')}</span></div>
                             <div className="basler-config-form">
                                 <div className="basler-form-group">
                                     <label>Pixel Format</label>
@@ -747,28 +759,28 @@ export default function BaslerCamera() {
                                         <option value="Mono10">Mono10 — 10 bits/pixel</option>
                                         <option value="Mono10p">Mono10p — 10 bits packed</option>
                                     </select>
-                                    <span className="basler-hint">acA1920-48gm: solo monocromo (gm). Sin Bayer.</span>
+                                    <span className="basler-hint">{t('pixHint')}</span>
                                 </div>
                                 <div className="config-row">
                                     <div className="basler-form-group">
-                                        <label>Width (px) — máx 1920</label>
+                                        <label>{t('widthPx')}</label>
                                         <input className="basler-input" type="number" min={16} max={1920} step={16}
                                             value={config.width} onChange={e => set('width', Number(e.target.value))} />
                                     </div>
                                     <div className="basler-form-group">
-                                        <label>Height (px) — máx 1200</label>
+                                        <label>{t('heightPx')}</label>
                                         <input className="basler-input" type="number" min={16} max={1200} step={2}
                                             value={config.height} onChange={e => set('height', Number(e.target.value))} />
                                     </div>
                                 </div>
                                 <div className="config-row">
                                     <div className="basler-form-group">
-                                        <label>OffsetX</label>
+                                        <label>{t('offsetX')}</label>
                                         <input className="basler-input" type="number" min={0} max={1904} step={16}
                                             value={config.offsetX} onChange={e => set('offsetX', Number(e.target.value))} />
                                     </div>
                                     <div className="basler-form-group">
-                                        <label>OffsetY</label>
+                                        <label>{t('offsetY')}</label>
                                         <input className="basler-input" type="number" min={0} max={1184} step={2}
                                             value={config.offsetY} onChange={e => set('offsetY', Number(e.target.value))} />
                                     </div>
@@ -777,7 +789,7 @@ export default function BaslerCamera() {
                         </div>
 
                         <div className="basler-panel">
-                            <div className="basler-panel-header"><span>Exposición y Ganancia</span></div>
+                            <div className="basler-panel-header"><span>{t('expGain')}</span></div>
                             <div className="basler-config-form">
                                 <div className="basler-form-group">
                                     <label>ExposureAuto</label>
@@ -789,7 +801,7 @@ export default function BaslerCamera() {
                                 </div>
                                 {config.exposureAuto === 'Off' && (
                                     <div className="basler-form-group">
-                                        <label>ExposureTimeAbs (µs): <strong>{config.exposureTimeAbs.toLocaleString()} µs</strong></label>
+                                        <label>{t('expTime')}: <strong>{config.exposureTimeAbs.toLocaleString()} µs</strong></label>
                                         <input type="range" className="basler-slider" min={38} max={1000000} step={100}
                                             value={config.exposureTimeAbs} onChange={e => set('exposureTimeAbs', Number(e.target.value))} />
                                         <div className="slider-labels"><span>38 µs</span><span>1 000 000 µs</span></div>
@@ -798,18 +810,18 @@ export default function BaslerCamera() {
                                 <div className="basler-form-group">
                                     <label>GainAuto</label>
                                     <select className="basler-input" value={config.gainAuto} onChange={e => set('gainAuto', e.target.value as GainAuto)}>
-                                        <option value="Off">Off — ganancia fija</option>
+                                        <option value="Off">Off</option>
                                         <option value="Once">Once</option>
                                         <option value="Continuous">Continuous</option>
                                     </select>
                                 </div>
                                 {config.gainAuto === 'Off' && (
                                     <div className="basler-form-group">
-                                        <label>GainRaw: <strong>{config.gainRaw}</strong></label>
+                                        <label>{t('gainRaw')}: <strong>{config.gainRaw}</strong></label>
                                         <input type="range" className="basler-slider" min={0} max={500} step={1}
                                             value={config.gainRaw} onChange={e => set('gainRaw', Number(e.target.value))} />
                                         <div className="slider-labels"><span>0</span><span>500 (raw)</span></div>
-                                        <span className="basler-hint">GainSelector = All (único canal en cámara gm)</span>
+                                        <span className="basler-hint">{t('gainHint')}</span>
                                     </div>
                                 )}
                             </div>
@@ -820,13 +832,13 @@ export default function BaslerCamera() {
                 {/* ══ TAB: ADQUISICIÓN ══════════════════════════════════════════════════ */}
                 {activeTab === 'acquisition' && (
                     <div className="basler-panel" style={{ maxWidth: 600 }}>
-                        <div className="basler-panel-header"><span>Adquisición</span></div>
+                        <div className="basler-panel-header"><span>{t('tabAcq')}</span></div>
                         <div className="basler-config-form">
                             <div className="basler-form-group">
                                 <label>AcquisitionMode</label>
                                 <select className="basler-input" value={config.acquisitionMode} onChange={e => set('acquisitionMode', e.target.value as AcquisitionMode)}>
-                                    <option value="Continuous">Continuous — grabación continua</option>
-                                    <option value="SingleFrame">SingleFrame — un frame por disparo</option>
+                                    <option value="Continuous">{t('acqCont')}</option>
+                                    <option value="SingleFrame">{t('acqSingle')}</option>
                                 </select>
                             </div>
                             <div className="basler-form-group">
@@ -835,7 +847,7 @@ export default function BaslerCamera() {
                                         onChange={e => set('acquisitionFrameRateEnable', e.target.checked)} />
                                     AcquisitionFrameRateEnable
                                 </label>
-                                <span className="basler-hint">Habilita el control de frame rate. Sin esto la cámara va al máximo posible según exposición.</span>
+                                <span className="basler-hint">{t('frameRateHint')}</span>
                             </div>
                             {config.acquisitionFrameRateEnable && (
                                 <div className="basler-form-group">
@@ -846,10 +858,10 @@ export default function BaslerCamera() {
                                 </div>
                             )}
                             <div className="basler-form-group">
-                                <label>MaxNumBuffer (stream grabber)</label>
+                                <label>{t('maxBuf')}</label>
                                 <input className="basler-input" type="number" min={1} max={64}
                                     value={config.maxNumBuffer} onChange={e => set('maxNumBuffer', Number(e.target.value))} />
-                                <span className="basler-hint">Número de buffers de imagen en el pipeline. Mínimo 1, recomendado ≥5.</span>
+                                <span className="basler-hint">{t('maxBufHint')}</span>
                             </div>
                         </div>
                     </div>
@@ -858,13 +870,13 @@ export default function BaslerCamera() {
                 {/* ══ TAB: TRIGGER ══════════════════════════════════════════════════════ */}
                 {activeTab === 'trigger' && (
                     <div className="basler-panel" style={{ maxWidth: 600 }}>
-                        <div className="basler-panel-header"><span>Trigger</span></div>
+                        <div className="basler-panel-header"><span>{t('tabTrig')}</span></div>
                         <div className="basler-config-form">
                             <div className="basler-form-group">
                                 <label>TriggerMode</label>
                                 <select className="basler-input" value={config.triggerMode} onChange={e => set('triggerMode', e.target.value as TriggerMode)}>
-                                    <option value="Off">Off — Free-running (sin trigger externo)</option>
-                                    <option value="On">On — Trigger activado</option>
+                                    <option value="Off">{t('trigOff')}</option>
+                                    <option value="On">{t('trigOn')}</option>
                                 </select>
                             </div>
                             {config.triggerMode === 'On' && (
@@ -879,15 +891,15 @@ export default function BaslerCamera() {
                                     <div className="basler-form-group">
                                         <label>TriggerSource</label>
                                         <select className="basler-input" value={config.triggerSource} onChange={e => set('triggerSource', e.target.value as TriggerSource)}>
-                                            <option value="Software">Software — WaitForFrameTriggerReady / ExecuteSoftwareTrigger</option>
-                                            <option value="Line1">Line1 — señal TTL/OptoCoupled entrada</option>
-                                            <option value="Line3">Line3 — señal LVDS/RS422 entrada</option>
-                                            <option value="Action1">Action1 — GigE Action Command</option>
+                                            <option value="Software">{t('trigSoft')}</option>
+                                            <option value="Line1">{t('trigLine1')}</option>
+                                            <option value="Line3">{t('trigLine3')}</option>
+                                            <option value="Action1">{t('trigAction1')}</option>
                                         </select>
                                     </div>
                                     <div className="basler-info-box">
-                                        <strong>Activación: RisingEdge</strong>
-                                        <p>La cámara acA1920-48gm soporta TriggerActivation = RisingEdge y FallingEdge. Configurable en pylon Viewer o via SDK.</p>
+                                        <strong>{t('actRising')}</strong>
+                                        <p>{t('actHint')}</p>
                                     </div>
                                 </>
                             )}
@@ -899,44 +911,44 @@ export default function BaslerCamera() {
                 {activeTab === 'gige' && (
                     <div className="basler-section-grid basler-config-grid">
                         <div className="basler-panel">
-                            <div className="basler-panel-header"><span>Stream GigE</span></div>
+                            <div className="basler-panel-header"><span>{t('streamGige')}</span></div>
                             <div className="basler-config-form">
                                 <div className="basler-form-group">
                                     <label>TransmissionType</label>
                                     <select className="basler-input" value={config.transmissionType} onChange={e => set('transmissionType', e.target.value as TransmissionType)}>
-                                        <option value="Unicast">Unicast — un receptor (recomendado)</option>
-                                        <option value="Multicast">Multicast — múltiples receptores en grupo</option>
-                                        <option value="LimitedBroadcast">LimitedBroadcast — toda la LAN</option>
-                                        <option value="SubnetDirectedBroadcast">SubnetDirectedBroadcast — toda la subred</option>
+                                        <option value="Unicast">{t('uniRec')}</option>
+                                        <option value="Multicast">{t('multiRec')}</option>
+                                        <option value="LimitedBroadcast">{t('limBcast')}</option>
+                                        <option value="SubnetDirectedBroadcast">{t('subBcast')}</option>
                                     </select>
                                 </div>
                                 <div className="basler-form-group">
                                     <label>Driver GigE</label>
                                     <select className="basler-input" value={config.gevDriver} onChange={e => set('gevDriver', e.target.value as GevDriver)}>
-                                        <option value="WindowsFilterDriver">Windows Filter Driver (pylon GigE Vision)</option>
-                                        <option value="SocketDriver">Socket Driver (genérico)</option>
+                                        <option value="WindowsFilterDriver">{t('winFilter')}</option>
+                                        <option value="SocketDriver">{t('sockDriver')}</option>
                                     </select>
-                                    <span className="basler-hint">Filter Driver ofrece mejor rendimiento y menor latencia en Windows.</span>
+                                    <span className="basler-hint">{t('filterHint')}</span>
                                 </div>
                                 <div className="basler-form-group">
                                     <label>Packet Size (bytes): <strong>{config.packetSizeBytes}</strong></label>
                                     <input type="range" className="basler-slider" min={576} max={9000} step={4}
                                         value={config.packetSizeBytes} onChange={e => set('packetSizeBytes', Number(e.target.value))} />
                                     <div className="slider-labels"><span>576</span><span>9000 (Jumbo)</span></div>
-                                    <span className="basler-hint">1500 para redes estándar. 9000 (Jumbo Frames) requiere soporte en switch y NIC.</span>
+                                    <span className="basler-hint">{t('packHint')}</span>
                                 </div>
                                 <div className="basler-form-group">
                                     <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                         <input type="checkbox" checked={config.enableResend} onChange={e => set('enableResend', e.target.checked)} />
-                                        EnableResend — reenvío de paquetes perdidos
+                                        {t('resendPkt')}
                                     </label>
-                                    <span className="basler-hint">Recomendado en redes con pérdida de paquetes. Puede añadir latencia.</span>
+                                    <span className="basler-hint">{t('resendHint')}</span>
                                 </div>
                             </div>
                         </div>
 
                         <div className="basler-panel">
-                            <div className="basler-panel-header"><span>Código pypylon generado</span></div>
+                            <div className="basler-panel-header"><span>{t('pylonCode')}</span></div>
                             <div className="basler-code-preview" style={{ flex: 1 }}>
                                 <div className="code-preview-header">⌨ Python / pypylon — acA1920-48gm</div>
                                 <pre className="code-preview-content">{`from pypylon import pylon
@@ -1016,7 +1028,7 @@ while camera.IsGrabbing():
                                     <input type="range" className="basler-slider" min={100} max={10000} step={100}
                                         value={tlConfig.heartbeatTimeout} onChange={e => setTL('heartbeatTimeout', Number(e.target.value))} />
                                     <div className="slider-labels"><span>100 ms</span><span>10 000 ms</span></div>
-                                    <span className="basler-hint">Timeout de heartbeat GigE (lado host). Si la cámara no recibe heartbeat en este tiempo, libera el canal de control.</span>
+                                    <span className="basler-hint">{t('hbHint')}</span>
                                 </div>
                                 <div className="config-row">
                                     <div className="basler-form-group">
@@ -1046,46 +1058,46 @@ while camera.IsGrabbing():
                                     <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                         <input type="checkbox" checked={tlConfig.connectionGuardEnable}
                                             onChange={e => setTL('connectionGuardEnable', e.target.checked)} />
-                                        ConnectionGuardEnable — PylonGigEConnectionGuard
+                                        {t('connGuard')}
                                     </label>
-                                    <span className="basler-hint">Activa el guardián de conexión que restaura automáticamente la conexión GigE si se pierde.</span>
+                                    <span className="basler-hint">{t('guardHint')}</span>
                                 </div>
                                 <div className="basler-form-group">
                                     <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                         <input type="checkbox" checked={tlConfig.migrationModeEnable}
                                             onChange={e => setTL('migrationModeEnable', e.target.checked)} />
-                                        MigrationModeEnable — mapeo SFNC 1.x → 2.x
+                                        {t('migMode')}
                                     </label>
-                                    <span className="basler-hint">Necesario solo si se usan nombres de nodos de pylon &lt; v5. Mantener desactivado en instalaciones nuevas.</span>
+                                    <span className="basler-hint">{t('migHint')}</span>
                                 </div>
                             </div>
                         </div>
 
                         <div className="basler-panel">
-                            <div className="basler-panel-header"><span>IP Persistente — ChangeIpConfiguration / SetPersistentIpAddress</span></div>
+                            <div className="basler-panel-header"><span>{t('persIpTitle')}</span></div>
                             <div className="basler-config-form">
                                 <div className="basler-info-box">
                                     <strong>BaslerCamera::ChangeIpConfiguration(EnablePersistentIp, EnableDhcp)</strong>
-                                    <p>Cambia la configuración de IP del dispositivo GigE. Requiere que la cámara esté abierta (<code>BaslerCamera.Open()</code>).</p>
+                                    <p>{t('persIpDesc')}</p>
                                 </div>
                                 <div className="basler-form-group">
                                     <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                         <input type="checkbox" checked={tlConfig.enablePersistentIp}
                                             onChange={e => setTL('enablePersistentIp', e.target.checked)} />
-                                        EnablePersistentIp — IP fija en la cámara
+                                        {t('persIpEnable')}
                                     </label>
                                 </div>
                                 <div className="basler-form-group">
                                     <label style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                         <input type="checkbox" checked={tlConfig.enableDhcp}
                                             onChange={e => setTL('enableDhcp', e.target.checked)} />
-                                        EnableDhcp — DHCP
+                                        {t('dhcpEnable')}
                                     </label>
                                 </div>
                                 {tlConfig.enablePersistentIp && (
                                     <>
                                         <div className="basler-form-group">
-                                            <label>IP Persistente (SetPersistentIpAddress)</label>
+                                            <label>{t('persIpStatic')}</label>
                                             <input className="basler-input" placeholder="Ej: 192.168.1.101"
                                                 value={tlConfig.persistentIp} onChange={e => setTL('persistentIp', e.target.value)} />
                                         </div>
@@ -1138,10 +1150,33 @@ ${tlConfig.enablePersistentIp ? `
                                 <span>{selected?.modelName} · {config.pixelFormat} · {config.width}×{config.height}</span>
                                 {backendOk && (
                                     <span style={{ color: '#00ff64', fontFamily: 'monospace', fontSize: '0.8rem' }}>
-                                        {serverFps > 0 ? `${serverFps} fps · frame #${serverFrames}` : 'Conectando stream...'}
+                                        {serverFps > 0 ? `${serverFps} fps · frame #${serverFrames}` : t('connStream')}
                                     </span>
                                 )}
                             </div>
+
+                            {/* ── Selector de tipo de captura (Mástil/Bastidor) ── */}
+                            <div className="target-selector" style={{ margin: '0 auto', minWidth: '240px', marginBottom: 0 }}>
+                                <button
+                                    className={`target-btn ${saveDir.includes('MASTILES') ? 'active' : ''}`}
+                                    onClick={() => {
+                                        setSaveDir('C:\\Users\\franj\\OneDrive\\Escritorio\\COSAS  FRAN\\PROYECTOS\\PINTURA\\ROBOTFLOW\\FOTOS\\MASTILES');
+                                        setVideoDir('C:\\Users\\franj\\OneDrive\\Escritorio\\COSAS  FRAN\\PROYECTOS\\PINTURA\\ROBOTFLOW\\VIDEOS\\MASTILES');
+                                    }}
+                                >
+                                    {t('mast')}
+                                </button>
+                                <button
+                                    className={`target-btn ${saveDir.includes('BASTIDOR') ? 'active' : ''}`}
+                                    onClick={() => {
+                                        setSaveDir('C:\\Users\\franj\\OneDrive\\Escritorio\\COSAS  FRAN\\PROYECTOS\\PINTURA\\ROBOTFLOW\\FOTOS\\BASTIDOR');
+                                        setVideoDir('C:\\Users\\franj\\OneDrive\\Escritorio\\COSAS  FRAN\\PROYECTOS\\PINTURA\\ROBOTFLOW\\VIDEOS\\BASTIDORES');
+                                    }}
+                                >
+                                    {t('frame')}
+                                </button>
+                            </div>
+
                             <button className="basler-btn disconnect small" onClick={handleDisconnect}>⏹ StopGrabbing</button>
                         </div>
 
@@ -1151,9 +1186,9 @@ ${tlConfig.enablePersistentIp ? `
                             {/* ── Video stream ─────────────────────────────────── */}
                             <div className="preview-stream-col">
 
-                                {/* Barra de zoom */}
+                                /* Barra de zoom */
                                 <div className="zoom-bar">
-                                    <button className="zoom-btn" onClick={zoomOut} title="Alejar">−</button>
+                                    <button className="zoom-btn" onClick={zoomOut} title={t('zoomOut')}>−</button>
                                     <input
                                         type="range" min={1} max={8} step={0.05}
                                         value={zoomLevel}
@@ -1164,15 +1199,15 @@ ${tlConfig.enablePersistentIp ? `
                                             if (nv <= 1) setPanOffset({ x: 0, y: 0 });
                                         }}
                                     />
-                                    <button className="zoom-btn" onClick={zoomIn} title="Acercar">+</button>
+                                    <button className="zoom-btn" onClick={zoomIn} title={t('zoomIn')}>+</button>
                                     <span className="zoom-label">{Math.round(zoomLevel * 100)}%</span>
                                     {zoomLevel > 1 && (
-                                        <button className="zoom-btn zoom-reset" onClick={zoomReset} title="Reset zoom">⊙</button>
+                                        <button className="zoom-btn zoom-reset" onClick={zoomReset} title={t('zoomReset')}>⊙</button>
                                     )}
                                     <button
                                         className="zoom-btn panel-toggle-btn"
                                         onClick={() => setPanelOpen(o => !o)}
-                                        title={panelOpen ? 'Ocultar panel' : 'Mostrar panel'}
+                                        title={panelOpen ? t('hidePanel') : t('showPanel')}
                                         style={{ marginLeft: 'auto' }}
                                     >
                                         {panelOpen ? '⟩' : '⟨'}
@@ -1235,27 +1270,29 @@ ${tlConfig.enablePersistentIp ? `
 
                             {/* ── Panel de captura + grabación (colapsable) ────────── */}
                             {panelOpen && (<div className="capture-panel">
+
+
                                 <div className="capture-panel-title">
                                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#00ff64" strokeWidth="1.8">
                                         <circle cx="12" cy="12" r="4" />
                                         <path d="M20.94 13A9 9 0 1 1 11 3.06" />
                                         <path d="M2 8h2M4 4l2 2M8 2v2" />
                                     </svg>
-                                    Captura de Imagen
+                                    {t('capImage')}
                                 </div>
 
                                 <div className="capture-field">
-                                    <label>📁 Directorio de fotos</label>
+                                    <label>📁 {t('dirPhotos')}</label>
                                     <input id="save-dir-input" className="basler-input capture-input"
                                         placeholder="Ej: C:\Fotos_Basler" value={saveDir}
                                         onChange={e => setSaveDir(e.target.value)} spellCheck={false} />
-                                    <span className="basler-hint">Se crea si no existe.</span>
+                                    <span className="basler-hint">{t('createIfNone')}</span>
                                 </div>
 
                                 <div className="capture-field">
-                                    <label>🏷 Nombre archivo (opcional)</label>
+                                    <label>🏷 {t('fileNameOpt')}</label>
                                     <input id="filename-input" className="basler-input capture-input"
-                                        placeholder="Auto: basler_SN_YYYYMMDD_HHMMSS.jpg"
+                                        placeholder={t('autoFile')}
                                         value={customFilename} onChange={e => setCustomFilename(e.target.value)}
                                         spellCheck={false} />
                                 </div>
@@ -1264,7 +1301,7 @@ ${tlConfig.enablePersistentIp ? `
                                     className={`basler-btn capture-btn ${capturing ? 'loading' : ''}`}
                                     onClick={handleSnapshot}
                                     disabled={capturing || !isConnected || !backendOk}>
-                                    {capturing ? <><span className="spin">↻</span> Guardando…</> : '📸 Tomar Foto'}
+                                    {capturing ? <><span className="spin">↻</span> {t('saving')}</> : `📸 ${t('takePhoto')}`}
                                 </button>
 
                                 {captureMsg && <div className={`capture-result ${captureMsg.ok ? 'ok' : 'err'}`}>{captureMsg.text}</div>}
@@ -1272,7 +1309,7 @@ ${tlConfig.enablePersistentIp ? `
                                 {/* Galería fotos */}
                                 {gallery && gallery.length > 0 && (
                                     <div className="capture-gallery">
-                                        <div className="capture-gallery-title">📂 Fotos ({gallery.length})</div>
+                                        <div className="capture-gallery-title">📂 {t('photos')} ({gallery.length})</div>
                                         {gallery.map((g, i) => (
                                             <div key={i} className="capture-gallery-item">
                                                 <div className="gallery-item-info">
@@ -1297,23 +1334,23 @@ ${tlConfig.enablePersistentIp ? `
                                     </svg>
                                     {isRecording
                                         ? <span className="rec-blink">● REC {Math.floor(recElapsed / 60).toString().padStart(2, '0')}:{(recElapsed % 60).toString().padStart(2, '0')}  ·  {recFrames}f</span>
-                                        : 'Grabar Vídeo'
+                                        : t('recVideo')
                                     }
                                 </div>
 
                                 <div className="capture-field">
-                                    <label>📁 Directorio de vídeos</label>
+                                    <label>📁 {t('dirVideos')}</label>
                                     <input id="video-dir-input" className="basler-input capture-input"
                                         placeholder="Ej: C:\Videos_Basler" value={videoDir}
                                         onChange={e => setVideoDir(e.target.value)}
                                         disabled={isRecording} spellCheck={false} />
-                                    <span className="basler-hint">Se crea si no existe.</span>
+                                    <span className="basler-hint">{t('createIfNone')}</span>
                                 </div>
 
                                 <div className="capture-field">
-                                    <label>🏷 Nombre vídeo (opcional)</label>
+                                    <label>🏷 {t('nameVideo')}</label>
                                     <input id="video-filename-input" className="basler-input capture-input"
-                                        placeholder="Auto: basler_SN_YYYYMMDD_HHMMSS.avi"
+                                        placeholder={t('autoFile')}
                                         value={videoFilename} onChange={e => setVideoFilename(e.target.value)}
                                         disabled={isRecording} spellCheck={false} />
                                 </div>
@@ -1343,13 +1380,13 @@ ${tlConfig.enablePersistentIp ? `
                                         className="basler-btn rec-btn"
                                         onClick={handleRecordStart}
                                         disabled={!isConnected || !backendOk}>
-                                        ● Iniciar Grabación
+                                        ● {t('startRec')}
                                     </button>
                                 ) : (
                                     <button id="rec-stop-btn"
                                         className="basler-btn rec-stop-btn"
                                         onClick={handleRecordStop}>
-                                        ⏹ Detener Grabación
+                                        ⏹ {t('stopRec')}
                                     </button>
                                 )}
 
@@ -1358,7 +1395,7 @@ ${tlConfig.enablePersistentIp ? `
                                 {/* Galería vídeos */}
                                 {videoGallery && videoGallery.length > 0 && (
                                     <div className="capture-gallery">
-                                        <div className="capture-gallery-title">🎬 Vídeos ({videoGallery.length})</div>
+                                        <div className="capture-gallery-title">🎬 {t('videos')} ({videoGallery.length})</div>
                                         {videoGallery.map((v, i) => (
                                             <div key={i} className="capture-gallery-item">
                                                 <div className="gallery-item-info">
@@ -1373,7 +1410,7 @@ ${tlConfig.enablePersistentIp ? `
 
                                 {/* Aviso si no hay backend */}
                                 {!backendOk && (
-                                    <div className="capture-result err">⚠ Necesitas camera_server.py activo.</div>
+                                    <div className="capture-result err">⚠ {t('needServer')}</div>
                                 )}
 
                             </div>)}{/* /capture-panel */}
@@ -1385,11 +1422,11 @@ ${tlConfig.enablePersistentIp ? `
                 {/* ── LOG PANEL ──────────────────────────────────── */}
                 <div className="basler-log-panel">
                     <div className="basler-log-header">
-                        <span>📋 pylon Log</span>
-                        <button className="basler-tab-mini" onClick={() => setLogs([])}>Limpiar</button>
+                        <span>📋 {t('pylonLog')}</span>
+                        <button className="basler-tab-mini" onClick={() => setLogs([])}>{t('clearBtn')}</button>
                     </div>
                     <div className="basler-log-body">
-                        {logs.length === 0 && <span className="log-empty">Sin actividad. Escanea la red o conecta la cámara.</span>}
+                        {logs.length === 0 && <span className="log-empty">{t('noLog')}</span>}
                         {logs.map((l, i) => (
                             <div key={i} className="log-line">
                                 <span className="log-time">{l.time}</span>

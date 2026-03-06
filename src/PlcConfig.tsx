@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useTranslation } from './i18n';
 
 // ─── OMRON CJ2M · FINS TCP/IP Protocol ───────────────────────────────────────
 // Puerto FINS TCP por defecto: 9600
@@ -59,6 +60,7 @@ const MEMORY_DESCRIPTIONS: Record<PLCVariable['memoryArea'], string> = {
 };
 
 export default function PlcConfig() {
+    const { t } = useTranslation();
     const [config, setConfig] = useState<FINSConfig>({
         plcIp: '192.168.0.1',
         plcPort: 9600,
@@ -260,7 +262,7 @@ export default function PlcConfig() {
         disconnected: '#6b7280', connecting: '#f59e0b', connected: '#22c55e', error: '#ef4444',
     };
     const statusLabel: Record<ConnectionStatus, string> = {
-        disconnected: 'Desconectado', connecting: 'Conectando...', connected: 'Conectado FINS TCP', error: 'Error FINS',
+        disconnected: t('plcConnStateDisconnected'), connecting: t('plcConnStateConnecting'), connected: t('plcConnStateConnected'), error: t('plcConnStateError'),
     };
     const logColor: Record<PLCLog['type'], string> = {
         info: '#93c5fd', success: '#4ade80', error: '#f87171', warning: '#fbbf24', fins: '#c084fc',
@@ -450,8 +452,8 @@ if __name__ == "__main__":
             <div className="plc-header">
                 <div className="plc-title-row">
                     <div>
-                        <h2>🏭 PLC OMRON CJ2M — FINS TCP/IP</h2>
-                        <p>Protocolo: FINS TCP · Puerto {config.plcPort} · Nodo FINS: {config.finsNode} (auto) · Hasta {config.maxChannels} conexiones</p>
+                        <h2>{t('plc')} — FINS TCP/IP</h2>
+                        <p>{t('plcPrtcl')} · Puerto {config.plcPort} · Nodo FINS: {config.finsNode} {t('plcAuto')} · {t('plcMaxConn')} {config.maxChannels}</p>
                     </div>
                     <div className="plc-status-badge" style={{ borderColor: statusColor[status], color: statusColor[status] }}>
                         <span className="plc-status-dot" style={{
@@ -465,10 +467,10 @@ if __name__ == "__main__":
                 <div className="plc-tabs">
                     {(['connection', 'variables', 'monitor', 'python'] as const).map(tab => (
                         <button key={tab} className={`plc-tab ${activeSection === tab ? 'active' : ''}`} onClick={() => setActiveSection(tab)}>
-                            {tab === 'connection' ? '⚙️ Conexión FINS'
-                                : tab === 'variables' ? '📋 Variables'
-                                    : tab === 'monitor' ? '📡 Monitor'
-                                        : '🐍 Python Bridge'}
+                            {tab === 'connection' ? t('plcTabConn')
+                                : tab === 'variables' ? t('plcTabVars')
+                                    : tab === 'monitor' ? t('plcTabMon')
+                                        : t('plcTabPy')}
                         </button>
                     ))}
                 </div>
@@ -482,10 +484,10 @@ if __name__ == "__main__":
                         <div className="plc-grid-2">
                             {/* Red */}
                             <div className="plc-card">
-                                <h3>🌐 Red — OMRON CJ2M</h3>
+                                <h3>{t('plcNetHeader')}</h3>
                                 <div className="plc-form">
                                     <div className="plc-field">
-                                        <label>Modo de Conexión</label>
+                                        <label>{t('plcConnModeLabel')}</label>
                                         <select
                                             value={config.connectionMode}
                                             onChange={e => setConfig({ ...config, connectionMode: e.target.value as 'client' | 'server' })}
@@ -499,52 +501,52 @@ if __name__ == "__main__":
                                                 width: '100%'
                                             }}
                                         >
-                                            <option value="client">Cliente FINS (La aplicación conecta al PLC)</option>
-                                            <option value="server">Servidor FINS (El PLC envía datos a la aplicación)</option>
+                                            <option value="client">{t('plcClientOpt')}</option>
+                                            <option value="server">{t('plcServerOpt')}</option>
                                         </select>
-                                        <span className="plc-hint">Si usas "Cliente" introduce la IP del PLC. Si usas "Servidor" el PLC conectará al PC automáticamente.</span>
+                                        <span className="plc-hint">{t('plcConnHint')}</span>
                                     </div>
                                     <div className="plc-field">
-                                        <label>IP Address del PLC</label>
+                                        <label>{t('plcIpLabel')}</label>
                                         <input value={config.plcIp} onChange={e => setConfig({ ...config, plcIp: e.target.value })}
                                             placeholder="192.168.1.100" disabled={status === 'connected'} />
-                                        <span className="plc-hint">Configurable en CX-Programmer / Sysmac Studio → EtherNet/IP settings</span>
+                                        <span className="plc-hint">{t('plcIpHint')}</span>
                                     </div>
                                     <div className="plc-field">
-                                        <label>Puerto FINS TCP</label>
+                                        <label>{t('plcPortLabel')}</label>
                                         <input type="number" value={config.plcPort} onChange={e => setConfig({ ...config, plcPort: +e.target.value })}
                                             disabled={status === 'connected'} />
-                                        <span className="plc-hint">Por defecto: 9600 (FINS TCP/IP · CJ2M CPU3x)</span>
+                                        <span className="plc-hint">{t('plcPortHint')}</span>
                                     </div>
                                     <div className="plc-field">
-                                        <label>Polling (ms)</label>
+                                        <label>{t('plcPollLabel')}</label>
                                         <input type="number" min={500} max={10000} value={config.pollInterval}
                                             onChange={e => setConfig({ ...config, pollInterval: +e.target.value })} />
-                                        <span className="plc-hint">Mín. 200ms recomendado — CJ2M ciclo mín 0.1 ms, latencia red ≤10 ms</span>
+                                        <span className="plc-hint">{t('plcPollHint')}</span>
                                     </div>
                                 </div>
                             </div>
 
                             {/* FINS Frame */}
                             <div className="plc-card">
-                                <h3>🔧 Parámetros FINS Frame</h3>
+                                <h3>{t('plcFinsFrameLabel')}</h3>
                                 <div className="plc-form">
                                     <div className="plc-field">
-                                        <label>Nodo Destino (PLC) — DA1</label>
+                                        <label>{t('plcFinsNodeLabel')}</label>
                                         <input type="number" min={1} max={254} value={config.finsNode}
                                             onChange={e => setConfig({ ...config, finsNode: +e.target.value })}
                                             disabled={status === 'connected'} />
-                                        <span className="plc-hint">⚡ Auto-calculado del último octeto de la IP · CJ2M max. 254 nodos</span>
+                                        <span className="plc-hint">{t('plcFinsNodeHint')}</span>
                                     </div>
                                     <div className="plc-field">
-                                        <label>Nodo Origen (Servidor) — SA1</label>
+                                        <label>{t('plcSrcNodeLabel')}</label>
                                         <input type="number" min={1} max={254} value={config.srcNode}
                                             onChange={e => setConfig({ ...config, srcNode: +e.target.value })}
                                             disabled={status === 'connected'} />
-                                        <span className="plc-hint">Último octeto de la IP de este servidor Python</span>
+                                        <span className="plc-hint">{t('plcSrcNodeHint')}</span>
                                     </div>
                                     <div className="plc-field">
-                                        <label>Red (DNA) / Unidad (DA2)</label>
+                                        <label>{t('plcNetUnitLabel')}</label>
                                         <div style={{ display: 'flex', gap: 8 }}>
                                             <input type="number" min={0} max={127} value={config.networkAddr}
                                                 onChange={e => setConfig({ ...config, networkAddr: +e.target.value })}
@@ -553,7 +555,7 @@ if __name__ == "__main__":
                                                 onChange={e => setConfig({ ...config, unitAddr: +e.target.value })}
                                                 disabled={status === 'connected'} style={{ flex: 1 }} />
                                         </div>
-                                        <span className="plc-hint">Red: 0 = local · Unidad: 0 = CPU Unit</span>
+                                        <span className="plc-hint">{t('plcNetUnitHint')}</span>
                                     </div>
                                 </div>
                             </div>
@@ -561,7 +563,7 @@ if __name__ == "__main__":
 
                         {/* FINS Frame Preview */}
                         <div className="plc-card plc-fins-frame">
-                            <h3>📦 Vista Previa FINS TCP Frame</h3>
+                            <h3>{t('plcPrevFrameLabel')}</h3>
                             <div className="fins-frame-bytes">
                                 <div className="fins-byte"><span>ICF</span><code>C0</code></div>
                                 <div className="fins-byte"><span>RSV</span><code>00</code></div>
@@ -581,7 +583,7 @@ if __name__ == "__main__":
 
                         {/* Arquitectura */}
                         <div className="plc-card plc-arch-card">
-                            <h3>🏗️ Arquitectura de Comunicación</h3>
+                            <h3>{t('plcArchHeader')}</h3>
                             <div className="plc-arch-flow">
                                 <div className="arch-node">
                                     <div className="arch-icon">⚛️</div>
@@ -599,9 +601,9 @@ if __name__ == "__main__":
                                     <div className="arch-icon">🏭</div>
                                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
                                         <span style={{ fontWeight: 'bold' }}>CJ2M</span>
-                                        {scanStatus === 'scanning' && <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: '#f59e0b', animation: 'pulse 1s infinite' }} title="Escaneando..." />}
+                                        {scanStatus === 'scanning' && <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: '#f59e0b', animation: 'pulse 1s infinite' }} title={t('scanningBtn')} />}
                                         {scanStatus === 'found' && <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 8px #22c55e' }} title="PLC Encontrado" />}
-                                        {(scanStatus === 'not_found' || scanStatus === 'error') && <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: '#ef4444' }} title="No encontrado" />}
+                                        {(scanStatus === 'not_found' || scanStatus === 'error') && <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: '#ef4444' }} title={t('error')} />}
                                     </div>
                                     <div className="arch-sub">Nodo {config.finsNode}</div>
                                 </div>
@@ -613,17 +615,17 @@ if __name__ == "__main__":
                             {status !== 'connected' ? (
                                 <>
                                     <button className="plc-btn-connect" onClick={handleScan} style={{ background: '#3b82f6' }}>
-                                        📡 Escanear PLC
+                                        {t('plcScanBtn')}
                                     </button>
                                     <button className="plc-btn-connect" onClick={handleConnect} disabled={status === 'connecting'}>
-                                        {status === 'connecting' ? '⏳ Conectando FINS TCP...' : '🔌 Conectar al CJ2M'}
+                                        {status === 'connecting' ? `⏳ ${t('plcConnStateConnecting')}` : t('plcConnectCj2m')}
                                     </button>
                                 </>
                             ) : (
                                 <>
-                                    <button className="plc-btn-cmnd-run" onClick={() => handleCmnd('RUN')}>▶ CMND → RUN</button>
-                                    <button className="plc-btn-cmnd-stop" onClick={() => handleCmnd('STOP')}>⏹ CMND → STOP</button>
-                                    <button className="plc-btn-disconnect" onClick={handleDisconnect}>Desconectar</button>
+                                    <button className="plc-btn-cmnd-run" onClick={() => handleCmnd('RUN')}>{t('plcCmdRun')}</button>
+                                    <button className="plc-btn-cmnd-stop" onClick={() => handleCmnd('STOP')}>{t('plcCmdStop')}</button>
+                                    <button className="plc-btn-disconnect" onClick={handleDisconnect}>{t('plcDisconnect')}</button>
                                 </>
                             )}
                         </div>
@@ -631,8 +633,8 @@ if __name__ == "__main__":
                         {/* Log Console */}
                         <div className="plc-log-box">
                             <div className="plc-log-header">
-                                <span>📟 Consola FINS TCP</span>
-                                <button className="plc-log-clear" onClick={() => setLogs([])}>Limpiar</button>
+                                <span>{t('plcLogHdr')}</span>
+                                <button className="plc-log-clear" onClick={() => setLogs([])}>{t('plcLogClear')}</button>
                             </div>
                             <div className="plc-log-body">
                                 {logs.map((l, i) => (
@@ -652,7 +654,7 @@ if __name__ == "__main__":
                 {activeSection === 'variables' && (
                     <div className="plc-section">
                         <div className="plc-card">
-                            <h3>📊 Áreas de Memoria OMRON CJ2M</h3>
+                            <h3>{t('plcMemHeader')}</h3>
                             <div className="plc-mem-areas">
                                 {MEMORY_AREAS.map(area => (
                                     <div key={area} className="mem-area-badge">
@@ -664,18 +666,18 @@ if __name__ == "__main__":
                         </div>
 
                         <div className="plc-var-header">
-                            <h3>Variables Mapeadas ({variables.length})</h3>
+                            <h3>{t('plcVarHeader')} ({variables.length})</h3>
                             <button className="plc-btn-add" onClick={() => {
                                 const nv: PLCVariable = { id: Date.now().toString(), name: 'NewVar', memoryArea: 'DM', address: 200, dataType: 'INT', value: null, description: '', access: 'RECV', lastUpdate: null };
                                 setVariables(p => [...p, nv]);
                                 setEditingVar(nv);
-                            }}>+ Nueva Variable</button>
+                            }}>{t('plcAddVar')}</button>
                         </div>
 
                         <div className="plc-var-table-wrapper">
                             <table className="plc-var-table">
                                 <thead>
-                                    <tr><th>Nombre</th><th>Área</th><th>Addr</th><th>Tipo</th><th>Comando</th><th>Descripción</th><th>Acciones</th></tr>
+                                    <tr><th>{t('plcColName')}</th><th>{t('plcColArea')}</th><th>{t('plcColAddr')}</th><th>{t('plcColType')}</th><th>{t('plcColCmd')}</th><th>{t('plcColDesc')}</th><th>{t('plcColActions')}</th></tr>
                                 </thead>
                                 <tbody>
                                     {variables.map(v => (
@@ -688,11 +690,11 @@ if __name__ == "__main__":
                                             <td className="var-desc">{v.description || '—'}</td>
                                             <td>
                                                 <div className="var-actions">
-                                                    <button className="var-btn-edit" onClick={() => setEditingVar({ ...v })}>✏️</button>
+                                                    <button className="var-btn-edit" onClick={() => setEditingVar({ ...v })}>{t('plcVarEd')}</button>
                                                     <button className="var-btn-del" onClick={() => {
                                                         setVariables(p => p.filter(x => x.id !== v.id));
                                                         log('warning', `Variable "${v.name}" eliminada`);
-                                                    }}>🗑️</button>
+                                                    }}>{t('plcVarDel')}</button>
                                                 </div>
                                             </td>
                                         </tr>
@@ -704,12 +706,12 @@ if __name__ == "__main__":
                         {editingVar && (
                             <div className="plc-modal-overlay" onClick={() => setEditingVar(null)}>
                                 <div className="plc-modal" onClick={e => e.stopPropagation()}>
-                                    <h3>✏️ Editar Variable FINS</h3>
+                                    <h3>{t('plcModalEdit')}</h3>
                                     <div className="plc-form">
                                         <div className="plc-grid-2">
                                             {[
-                                                { label: 'Nombre', key: 'name', type: 'text' },
-                                                { label: 'Descripción', key: 'description', type: 'text' },
+                                                { label: t('plcColName'), key: 'name', type: 'text' },
+                                                { label: t('plcColDesc'), key: 'description', type: 'text' },
                                                 { label: 'Dirección', key: 'address', type: 'number' },
                                             ].map(f => (
                                                 <div key={f.key} className="plc-field">
@@ -719,19 +721,19 @@ if __name__ == "__main__":
                                                 </div>
                                             ))}
                                             <div className="plc-field">
-                                                <label>Área de Memoria</label>
+                                                <label>{t('plcColArea')}</label>
                                                 <select value={editingVar.memoryArea} onChange={e => setEditingVar({ ...editingVar, memoryArea: e.target.value as PLCVariable['memoryArea'] })}>
                                                     {MEMORY_AREAS.map(a => <option key={a} value={a}>{a} — {MEMORY_DESCRIPTIONS[a].split('—')[0]}</option>)}
                                                 </select>
                                             </div>
                                             <div className="plc-field">
-                                                <label>Tipo de Dato</label>
+                                                <label>{t('plcColType')}</label>
                                                 <select value={editingVar.dataType} onChange={e => setEditingVar({ ...editingVar, dataType: e.target.value as PLCVariable['dataType'] })}>
                                                     {DATA_TYPES.map(t => <option key={t}>{t}</option>)}
                                                 </select>
                                             </div>
                                             <div className="plc-field">
-                                                <label>Comando FINS</label>
+                                                <label>{t('plcColCmd')}</label>
                                                 <select value={editingVar.access} onChange={e => setEditingVar({ ...editingVar, access: e.target.value as PLCVariable['access'] })}>
                                                     {ACCESS_TYPES.map(a => <option key={a}>{a}</option>)}
                                                 </select>
@@ -743,8 +745,8 @@ if __name__ == "__main__":
                                             setVariables(p => p.map(v => v.id === editingVar.id ? editingVar : v));
                                             log('info', `Variable "${editingVar.name}" actualizada: ${editingVar.memoryArea}[${editingVar.address}] ${editingVar.dataType}`);
                                             setEditingVar(null);
-                                        }}>💾 Guardar</button>
-                                        <button className="plc-btn-disconnect" onClick={() => setEditingVar(null)}>Cancelar</button>
+                                        }}>{t('plcSave')}</button>
+                                        <button className="plc-btn-disconnect" onClick={() => setEditingVar(null)}>{t('plcCancel')}</button>
                                     </div>
                                 </div>
                             </div>
@@ -757,7 +759,7 @@ if __name__ == "__main__":
                     <div className="plc-section">
                         {status !== 'connected' && (
                             <div className="plc-offline-banner">
-                                ⚠️ PLC no conectado — Los valores mostrados son simulados. Conecta en la pestaña "Conexión FINS".
+                                {t('plcOfflineBan')}
                             </div>
                         )}
                         <div className="plc-monitor-grid">
@@ -797,7 +799,7 @@ if __name__ == "__main__":
                                                         (e.target as HTMLInputElement).value = '';
                                                     }
                                                 }} />
-                                            <span className="monitor-hint">↵ SEND → PLC</span>
+                                            <span className="monitor-hint">{t('plcMonitorHint')}</span>
                                         </div>
                                     )}
                                     <div className="monitor-desc">{v.description}</div>
@@ -815,7 +817,7 @@ if __name__ == "__main__":
                                 <h3>🐍 Script Python — FINS TCP Bridge (CJ2M)</h3>
                                 <button className="plc-btn-connect" style={{ padding: '8px 16px', fontSize: 13 }}
                                     onClick={() => { navigator.clipboard.writeText(pythonScript); log('success', 'Script Python copiado al portapapeles'); }}>
-                                    📋 Copiar script
+                                    {t('plcPythonCopy')}
                                 </button>
                             </div>
                             <div className="plc-install-box">
