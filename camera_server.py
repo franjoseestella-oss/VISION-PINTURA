@@ -8,6 +8,8 @@ Arranca un servidor HTTP en http://localhost:8765 que:
   POST /api/disconnect      → detener grabación y cerrar
   GET  /api/stream          → MJPEG stream (imagen real o simulada)
   GET  /api/snapshot        → JPEG único (para debug)
+  GET  /api/calibration/capture   → captura frame y detecta esquinas del tablero
+  POST /api/calibration/compute   → calibra con las imágenes guardadas
 
 Dependencias:
   pip install pypylon opencv-python
@@ -619,6 +621,64 @@ class CameraHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b'{"ok": False, "error": "No IP"}')
 
+        # ── /api/calibration/capture — captura frame y detecta esquinas
+        elif path == "/api/calibration/capture":
+            import os, glob
+            query = parse_qs(parsed.query)
+            save_dir = query.get("dir", [""])[0]
+            cols     = int(query.get("cols", ["9"])[0])
+            rows     = int(query.get("rows", ["6"])[0])
+
+            if not save_dir:
+                self._json_response({"ok": False, "error": "Falta el parámetro 'dir'"})
+                return
+
+            try:
+                os.makedirs(save_dir, exist_ok=True)
+            except Exception as e:
+                self._json_response({"ok": False, "error": f"No se pudo crear el directorio: {e}"})
+                return
+
+            with frame_lock:
+                frame = current_frame
+
+            if frame is None:
+                self._json_response({"ok": False, "error": "Sin frame disponible. ¿Está la cámara conectada?"})
+                return
+
+            # Nombre de archivo secuencial
+            existing = glob.glob(os.path.join(save_dir, "cal_*.jpg"))
+            idx = len(existing) + 1
+            filename = f"cal_{idx:04d}.jpg"
+            save_path = os.path.join(save_dir, filename)
+
+            # Guardar imagen
+            try:
+                ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                if ret:
+                    with open(save_path, 'wb') as f:
+                        f.write(bytes(buf))
+                else:
+                    raise RuntimeError("imencode falló")
+            except Exception as e:
+                self._json_response({"ok": False, "error": f"Error al guardar imagen: {e}"})
+                return
+
+            # Detectar esquinas del tablero
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+            corners_found, _ = cv2.findChessboardCorners(
+                gray, (cols, rows),
+                cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+            )
+
+            print(f"[INFO] Cal capture: {filename}  corners={bool(corners_found)}")
+            self._json_response({
+                "ok": True,
+                "filename": filename,
+                "path": save_path,
+                "corners_found": bool(corners_found),
+            })
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -632,6 +692,7 @@ class CameraHandler(BaseHTTPRequestHandler):
             params = json.loads(body)
         except Exception:
             params = {}
+
 
         # ── /api/connect
         if path == "/api/connect":
@@ -652,6 +713,85 @@ class CameraHandler(BaseHTTPRequestHandler):
         elif path == "/api/record/stop":
             result = stop_recording()
             self._json_response(result)
+
+        # ── /api/calibration/compute — calibra cámara con las imágenes
+        elif path == "/api/calibration/compute":
+            import os, glob
+
+            save_dir  = params.get("dir", "")
+            cols      = int(params.get("cols", 9))
+            rows      = int(params.get("rows", 6))
+            square_mm = float(params.get("square_mm", 25.0))
+
+            if not save_dir:
+                self._json_response({"ok": False, "error": "Falta el parámetro 'dir'"})
+                return
+
+            images = sorted(glob.glob(os.path.join(save_dir, "cal_*.jpg")))
+            if len(images) < 4:
+                self._json_response({"ok": False, "error": f"Se necesitan al menos 4 imágenes, solo hay {len(images)}"})
+                return
+
+            # Puntos 3D del tablero (en mm)
+            objp = np.zeros((rows * cols, 3), np.float32)
+            objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * square_mm
+
+            obj_points = []  # puntos 3D reales
+            img_points = []  # puntos 2D en imagen
+            img_shape  = None
+
+            for img_path in images:
+                img  = cv2.imread(img_path)
+                if img is None:
+                    continue
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                img_shape = gray.shape[::-1]
+
+                found, corners = cv2.findChessboardCorners(
+                    gray, (cols, rows),
+                    cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+                )
+
+                if found:
+                    # Refinar esquinas
+                    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                    corners2 = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+                    obj_points.append(objp)
+                    img_points.append(corners2)
+
+            if len(obj_points) < 4:
+                self._json_response({
+                    "ok": False,
+                    "error": f"Solo {len(obj_points)} imágenes con esquinas detectadas. Se necesitan al menos 4."
+                })
+                return
+
+            try:
+                rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
+                    obj_points, img_points, img_shape, None, None
+                )
+
+                fx = float(camera_matrix[0, 0])
+                fy = float(camera_matrix[1, 1])
+                cx = float(camera_matrix[0, 2])
+                cy = float(camera_matrix[1, 2])
+                k1, k2, p1, p2, k3 = [float(x) for x in dist_coeffs.ravel()[:5]]
+
+                print(f"[INFO] Calibración OK: RMS={rms:.4f} imgs={len(obj_points)}")
+                self._json_response({
+                    "ok": True,
+                    "result": {
+                        "rms": round(rms, 6),
+                        "fx": fx, "fy": fy,
+                        "cx": cx, "cy": cy,
+                        "k1": k1, "k2": k2,
+                        "p1": p1, "p2": p2,
+                        "k3": k3,
+                        "image_count": len(obj_points),
+                    }
+                })
+            except Exception as e:
+                self._json_response({"ok": False, "error": f"cv2.calibrateCamera falló: {e}"})
 
         # ── /api/disconnect
         elif path == "/api/disconnect":

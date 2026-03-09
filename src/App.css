@@ -3537,3 +3537,109 @@ input:checked+.slider:before {
   display: flex;
   gap: 10px;
 }
+
+/* ══════════════════════════════════════════════════════
+   CAMERA CALIBRATION TAB
+   ══════════════════════════════════════════════════════ */
+
+/* Tab badge especial */
+.basler-tab.cal-tab {
+  border-color: transparent;
+  position: relative;
+}
+.basler-tab.cal-tab.active {
+  border-bottom-color: #a78bfa;
+  color: #a78bfa;
+}
+.basler-tab.cal-tab:hover:not(.active) {
+  color: #c4b5fd;
+}
+
+/* Lista de imágenes capturadas */
+.cal-images-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.cal-images-list::-webkit-scrollbar {
+  width: 5px;
+}
+.cal-images-list::-webkit-scrollbar-track { background: transparent; }
+.cal-images-list::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+
+.cal-image-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid #21262d;
+  font-family: monospace;
+  transition: border-color 0.15s;
+}
+.cal-image-item.ok {
+  background: rgba(0, 255, 100, 0.04);
+  border-color: rgba(0, 255, 100, 0.18);
+  color: #00ff64;
+}
+.cal-image-item.warn {
+  background: rgba(255, 165, 0, 0.05);
+  border-color: rgba(255, 165, 0, 0.2);
+  color: #ffa500;
+}
+
+/* Matriz intrínseca 3×3 */
+.cal-matrix {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.cal-matrix-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.cal-cell {
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 4px;
+  padding: 7px 6px;
+  text-align: center;
+  font-size: 0.78rem;
+  color: #79c0ff;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+/* Chips de coeficientes de distorsión */
+.cal-dist-chip {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.cal-dist-name {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cal-dist-val {
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.72rem;
+  color: #d2a8ff;
+  font-weight: 600;
+}
