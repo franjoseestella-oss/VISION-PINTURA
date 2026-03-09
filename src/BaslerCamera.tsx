@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from './i18n';
 
 // ─── Tipos reales basados en BaslerCameraCameraParams.h (acA1920-48gm) ────────
@@ -1506,230 +1506,293 @@ ${tlConfig.enablePersistentIp ? `
                     </div>
                 )}
 
-                {/* ══ TAB: CALIBRACIÓN ══════════════════════════════════════════════════ */}
+                {/* â•”â•â• TAB: CALIBRACIÃ“N â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•— */}
                 {activeTab === 'calibration' && (
-                    <div className="basler-section-grid basler-config-grid">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, flex: 1, minHeight: 0 }}>
 
-                        {/* Panel izquierdo: configuración + captura */}
-                        <div className="basler-panel">
-                            <div className="basler-panel-header">
-                                <span>📐 {t('calTitle')}</span>
+                        <div className="preview-main-layout">
+
+                            {/* â”€â”€ Columna izquierda: stream en vivo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+                            <div className="preview-stream-col">
+
+                                {/* Estado de conexiÃ³n */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+                                    <div className="preview-live-dot"
+                                        style={{ background: isConnected && backendOk ? '#00ff64' : '#ff4444' }} />
+                                    <span style={{ fontSize: '0.82rem', color: '#8b949e' }}>
+                                        {backendOk ? 'âœ” camera_server.py' : 'âš  Sin servidor'}
+                                        {' Â· '}
+                                        {isConnected ? (selected?.modelName ?? 'CÃ¡mara conectada') : 'Desconectada'}
+                                    </span>
+                                    <span style={{ marginLeft: 'auto', fontFamily: 'monospace', fontSize: '0.78rem', color: '#00ff64' }}>
+                                        {backendOk ? `${serverFps} fps` : `${config.acquisitionFrameRateAbs.toFixed(1)} fps`}
+                                    </span>
+                                </div>
+
+                                {/* Stream MJPEG â€” idÃ©ntico al del Preview tab */}
+                                <div className="stream-zoom-wrap" style={{ cursor: 'default', minHeight: 340 }}>
+                                    {backendOk ? (
+                                        <img
+                                            key={streamKey}
+                                            src={`http://127.0.0.1:8765/api/stream?t=${streamKey}`}
+                                            alt="Calibration MJPEG Stream"
+                                            className="stream-zoom-img"
+                                            draggable={false}
+                                            style={{ transform: 'none', objectFit: 'contain' }}
+                                            onError={() => log('error', 'Error cargando stream (calibraciÃ³n)')}
+                                        />
+                                    ) : (
+                                        <canvas
+                                            ref={canvasRef} width={640} height={400}
+                                            className="stream-zoom-img"
+                                            style={{ transform: 'none' }}
+                                        />
+                                    )}
+
+                                    {/* Overlay: parÃ¡metros tablero */}
+                                    <div style={{
+                                        position: 'absolute', bottom: 10, left: 10,
+                                        background: 'rgba(0,0,0,0.72)', backdropFilter: 'blur(4px)',
+                                        border: '1px solid #a78bfa50', borderRadius: 6,
+                                        padding: '4px 10px', fontSize: '0.72rem', fontFamily: 'monospace',
+                                        color: '#c4b5fd', pointerEvents: 'none',
+                                    }}>
+                                        {String.fromCodePoint(0x1F4D0)} {calCols}x{calRows} {'\u00B7'} {calSquare} mm
+                                    </div>
+
+                                    {/* Overlay: contador imÃ¡genes */}
+                                    {calImages.length > 0 && (
+                                        <div style={{
+                                            position: 'absolute', top: 10, right: 10,
+                                            background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(4px)',
+                                            border: '1px solid #00ff6445', borderRadius: 6,
+                                            padding: '4px 10px', fontSize: '0.72rem', fontFamily: 'monospace',
+                                            color: '#00ff64', pointerEvents: 'none',
+                                        }}>
+                                            {String.fromCodePoint(0x1F4F8)} {calImages.length} {'\u00B7'} {'\u2714'} {calImages.filter(i => i.corners).length} {t('calValid')}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Chips de mÃ©tricas */}
+                                <div className="preview-metrics">
+                                    <div className="metric-chip">{config.pixelFormat}</div>
+                                    <div className="metric-chip">Exp: {config.exposureTimeAbs.toLocaleString()} {'\u00B5'}s</div>
+                                    <div className="metric-chip">Gain: {config.gainRaw} raw</div>
+                                    <div className="metric-chip">IP: {selected?.ipAddress ?? '192.168.0.201'}</div>
+                                </div>
+
+                                {/* Resultados debajo del stream */}
+                                {calResult ? (
+                                    <div className="basler-panel" style={{ marginTop: 4 }}>
+                                        <div className="basler-panel-header">
+                                            <span>{String.fromCodePoint(0x1F3AF)} {t('calResults')}</span>
+                                        </div>
+                                        <div className="basler-config-form">
+
+                                            {/* RMS badge */}
+                                            <div style={{
+                                                background: calResult.rms < 0.5 ? 'rgba(0,255,100,0.08)' : calResult.rms < 1.0 ? 'rgba(255,165,0,0.08)' : 'rgba(255,68,68,0.08)',
+                                                border: `1px solid ${calResult.rms < 0.5 ? '#00ff64' : calResult.rms < 1.0 ? '#ffa500' : '#ff4444'}`,
+                                                borderRadius: 8, padding: '10px 14px',
+                                                display: 'flex', alignItems: 'center', gap: 12,
+                                            }}>
+                                                <span style={{ fontSize: '1.8rem' }}>
+                                                    {calResult.rms < 0.5 ? '\u2705' : calResult.rms < 1.0 ? '\u26A0\uFE0F' : '\u274C'}
+                                                </span>
+                                                <div>
+                                                    <div style={{
+                                                        fontFamily: 'monospace', fontSize: '1.1rem', fontWeight: 'bold',
+                                                        color: calResult.rms < 0.5 ? '#00ff64' : calResult.rms < 1.0 ? '#ffa500' : '#ff4444',
+                                                    }}>
+                                                        RMS = {calResult.rms.toFixed(4)} px
+                                                    </div>
+                                                    <div style={{ fontSize: '0.73rem', color: '#8b949e' }}>
+                                                        {calResult.rms < 0.5 ? t('calRmsGood') : calResult.rms < 1.0 ? t('calRmsMed') : t('calRmsBad')}
+                                                        {' \u00B7 '}{calResult.image_count} {t('calImagesUsed')}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                                                {/* Matriz K */}
+                                                <div>
+                                                    <div className="basler-panel-header" style={{ marginBottom: 6, fontSize: '0.76rem' }}>
+                                                        <span>{String.fromCodePoint(0x1F52D)} {t('calIntrinsic')}</span>
+                                                    </div>
+                                                    <div className="cal-matrix">
+                                                        <div className="cal-matrix-grid">
+                                                            <div className="cal-cell">fx={calResult.fx.toFixed(1)}</div>
+                                                            <div className="cal-cell">0</div>
+                                                            <div className="cal-cell">cx={calResult.cx.toFixed(1)}</div>
+                                                            <div className="cal-cell">0</div>
+                                                            <div className="cal-cell">fy={calResult.fy.toFixed(1)}</div>
+                                                            <div className="cal-cell">cy={calResult.cy.toFixed(1)}</div>
+                                                            <div className="cal-cell">0</div>
+                                                            <div className="cal-cell">0</div>
+                                                            <div className="cal-cell">1</div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                {/* DistorsiÃ³n */}
+                                                <div>
+                                                    <div className="basler-panel-header" style={{ marginBottom: 6, fontSize: '0.76rem' }}>
+                                                        <span>{String.fromCodePoint(0x1F300)} {t('calDistortion')}</span>
+                                                    </div>
+                                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+                                                        {([['k1', calResult.k1], ['k2', calResult.k2], ['k3', calResult.k3], ['p1', calResult.p1], ['p2', calResult.p2]] as [string, number][]).map(([name, val]) => (
+                                                            <div key={name} className="cal-dist-chip">
+                                                                <span className="cal-dist-name">{name}</span>
+                                                                <span className="cal-dist-val">{val.toFixed(5)}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* CÃ³digo Python */}
+                                            <div className="basler-code-preview">
+                                                <div className="code-preview-header">{String.fromCodePoint(0x2328)} Python / OpenCV &mdash; Undistort</div>
+                                                <pre className="code-preview-content">{
+`import cv2, numpy as np
+
+camera_matrix = np.array([
+    [${calResult.fx.toFixed(2)}, 0, ${calResult.cx.toFixed(2)}],
+    [0, ${calResult.fy.toFixed(2)}, ${calResult.cy.toFixed(2)}],
+    [0, 0, 1]
+])
+dist_coeffs = np.array([[${calResult.k1.toFixed(6)}, ${calResult.k2.toFixed(6)}, ${calResult.p1.toFixed(6)}, ${calResult.p2.toFixed(6)}, ${calResult.k3.toFixed(6)}]])
+
+h, w = frame.shape[:2]
+new_mtx, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 1, (w,h))
+undistorted   = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_mtx)`
+                                                }</pre>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div style={{
+                                        marginTop: 6, padding: '14px 18px',
+                                        background: '#161b22', border: '1px solid #30363d',
+                                        borderRadius: 8, textAlign: 'center', color: '#8b949e', fontSize: '0.82rem',
+                                    }}>
+                                        <div style={{ fontSize: '1.5rem', marginBottom: 6 }}>{String.fromCodePoint(0x1F3AF)}</div>
+                                        <strong style={{ color: '#cdd9e5' }}>{t('calNoResult')}</strong>
+                                        <div style={{ marginTop: 4, fontSize: '0.75rem' }}>{t('calNoResultSub')}</div>
+                                    </div>
+                                )}
                             </div>
-                            <div className="basler-config-form">
 
-                                <div className="basler-info-box" style={{ marginBottom: 16 }}>
-                                    <strong>{t('calDesc')}</strong>
-                                    <p style={{ marginTop: 6, lineHeight: 1.6 }}>{t('calDescDetail')}</p>
+                            {/* â”€â”€ Panel derecho: config + captura + lista â”€â”€â”€â”€â”€â”€â”€â”€ */}
+                            <div className="capture-panel">
+
+                                <div className="capture-panel-title">{String.fromCodePoint(0x1F4D0)} {t('calTitle')}</div>
+
+                                <div style={{ fontSize: '0.72rem', color: '#8b949e', lineHeight: 1.5 }}>
+                                    {t('calDesc')}
                                 </div>
 
-                                {/* Configuración tablero */}
-                                <div className="basler-panel-header" style={{ marginBottom: 8, fontSize: '0.78rem' }}>
-                                    <span>🔲 {t('calBoard')}</span>
+                                {/* Checkerboard config */}
+                                <div className="capture-field">
+                                    <label>{String.fromCodePoint(0x1F532)} {t('calBoard')}</label>
                                 </div>
 
-                                <div className="config-row">
-                                    <div className="basler-form-group">
-                                        <label>{t('calCols')} <strong>{calCols}</strong></label>
-                                        <input className="basler-input" type="number" min={3} max={20}
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                                    <div className="capture-field">
+                                        <label>{t('calCols')}: <strong style={{ color: '#a78bfa' }}>{calCols}</strong></label>
+                                        <input className="basler-input capture-input" type="number" min={3} max={20}
                                             value={calCols} onChange={e => setCalCols(Number(e.target.value))} />
                                         <span className="basler-hint">{t('calColsHint')}</span>
                                     </div>
-                                    <div className="basler-form-group">
-                                        <label>{t('calRows')} <strong>{calRows}</strong></label>
-                                        <input className="basler-input" type="number" min={3} max={20}
+                                    <div className="capture-field">
+                                        <label>{t('calRows')}: <strong style={{ color: '#a78bfa' }}>{calRows}</strong></label>
+                                        <input className="basler-input capture-input" type="number" min={3} max={20}
                                             value={calRows} onChange={e => setCalRows(Number(e.target.value))} />
                                         <span className="basler-hint">{t('calRowsHint')}</span>
                                     </div>
                                 </div>
 
-                                <div className="basler-form-group">
-                                    <label>{t('calSquare')}: <strong>{calSquare} mm</strong></label>
+                                <div className="capture-field">
+                                    <label>{t('calSquare')}: <strong style={{ color: '#a78bfa' }}>{calSquare} mm</strong></label>
                                     <input type="range" className="basler-slider" min={5} max={100} step={0.5}
                                         value={calSquare} onChange={e => setCalSquare(Number(e.target.value))} />
                                     <div className="slider-labels"><span>5 mm</span><span>100 mm</span></div>
-                                    <span className="basler-hint">{t('calSquareHint')}</span>
                                 </div>
 
-                                <div className="basler-form-group">
-                                    <label>📁 {t('calDir')}</label>
-                                    <input className="basler-input" spellCheck={false}
+                                <div className="capture-divider" />
+
+                                {/* Directorio */}
+                                <div className="capture-field">
+                                    <label>{String.fromCodePoint(0x1F4C1)} {t('calDir')}</label>
+                                    <input className="basler-input capture-input" spellCheck={false}
                                         value={calSaveDir} onChange={e => setCalSaveDir(e.target.value)} />
                                     <span className="basler-hint">{t('calDirHint')}</span>
                                 </div>
 
-                                {/* Acciones */}
-                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-                                    <button
-                                        className={`basler-btn capture-btn ${calCapturing ? 'loading' : ''}`}
-                                        style={{ flex: 1 }}
-                                        onClick={handleCalCapture}
-                                        disabled={calCapturing || !isConnected || !backendOk}>
-                                        {calCapturing
-                                            ? <><span className="spin">↻</span> {t('calCapturing')}</>
-                                            : `📸 ${t('calCapture')}`}
-                                    </button>
-                                    <button
-                                        className={`basler-btn connect ${calComputing ? 'loading' : ''}`}
-                                        style={{ flex: 1 }}
-                                        onClick={handleCalCompute}
-                                        disabled={calComputing || calImages.filter(i => i.corners).length < 4}>
-                                        {calComputing
-                                            ? <><span className="spin">↻</span> {t('calComputing')}</>
-                                            : `🎯 ${t('calCompute')}`}
-                                    </button>
-                                    <button
-                                        className="basler-btn disconnect small"
-                                        onClick={handleCalClear}
-                                        title={t('calClear')}>
-                                        🗑
-                                    </button>
-                                </div>
+                                {/* Botones de acciÃ³n */}
+                                <button
+                                    className={`basler-btn capture-btn ${calCapturing ? 'loading' : ''}`}
+                                    onClick={handleCalCapture}
+                                    disabled={calCapturing || !isConnected || !backendOk}>
+                                    {calCapturing
+                                        ? <><span className="spin">{'\u21BB'}</span> {t('calCapturing')}</>
+                                        : `${String.fromCodePoint(0x1F4F8)} ${t('calCapture')}`}
+                                </button>
+
+                                <button
+                                    className={`basler-btn connect ${calComputing ? 'loading' : ''}`}
+                                    onClick={handleCalCompute}
+                                    disabled={calComputing || calImages.filter(i => i.corners).length < 4}>
+                                    {calComputing
+                                        ? <><span className="spin">{'\u21BB'}</span> {t('calComputing')}</>
+                                        : `${String.fromCodePoint(0x1F3AF)} ${t('calCompute')}`}
+                                </button>
 
                                 {!backendOk && (
-                                    <div className="capture-result err" style={{ marginTop: 8 }}>⚠ {t('needServer')}</div>
+                                    <div className="capture-result err">{'\u26A0'} {t('needServer')}</div>
                                 )}
                                 {!isConnected && backendOk && (
-                                    <div className="capture-result err" style={{ marginTop: 8 }}>⚠ {t('calNeedCam')}</div>
+                                    <div className="capture-result err">{'\u26A0'} {t('calNeedCam')}</div>
                                 )}
-
                                 {calMsg && (
-                                    <div className={`capture-result ${calMsg.ok ? 'ok' : 'err'}`} style={{ marginTop: 8 }}>
-                                        {calMsg.text}
-                                    </div>
+                                    <div className={`capture-result ${calMsg.ok ? 'ok' : 'err'}`}>{calMsg.text}</div>
                                 )}
 
-                                {/* Lista de imágenes capturadas */}
-                                {calImages.length > 0 && (
+                                <div className="capture-divider" />
+
+                                {/* Lista de imÃ¡genes */}
+                                <div className="capture-gallery-title" style={{ display: 'flex', alignItems: 'center' }}>
+                                    <span>
+                                        {String.fromCodePoint(0x1F4C2)} {t('calImages')} ({calImages.length})
+                                        {' \u00B7 '}{'\u2714'} {calImages.filter(i => i.corners).length} {t('calValid')}
+                                    </span>
+                                    {calImages.length > 0 && (
+                                        <button className="basler-tab-mini" style={{ marginLeft: 'auto' }} onClick={handleCalClear}>
+                                            {String.fromCodePoint(0x1F5D1)}
+                                        </button>
+                                    )}
+                                </div>
+
+                                {calImages.length === 0 ? (
+                                    <div style={{ fontSize: '0.75rem', color: '#484f58', fontFamily: 'monospace' }}>
+                                        &mdash; {t('calNoResult')} &mdash;
+                                    </div>
+                                ) : (
                                     <div className="cal-images-list">
-                                        <div className="capture-gallery-title">
-                                            📂 {t('calImages')} ({calImages.length}) · ✔ {calImages.filter(i => i.corners).length} {t('calValid')}
-                                        </div>
                                         {calImages.map((img, i) => (
                                             <div key={i} className={`cal-image-item ${img.corners ? 'ok' : 'warn'}`}>
-                                                <span style={{ fontSize: '0.85rem' }}>
-                                                    {img.corners ? '✔' : '⚠'} {img.filename}
+                                                <span style={{ fontSize: '0.82rem' }}>
+                                                    {img.corners ? '\u2714' : '\u26A0'} {img.filename}
                                                 </span>
-                                                <span style={{ fontSize: '0.75rem', color: '#8b949e' }}>{img.time}</span>
+                                                <span style={{ fontSize: '0.7rem', color: '#8b949e', flexShrink: 0 }}>{img.time}</span>
                                             </div>
                                         ))}
                                     </div>
                                 )}
-                            </div>
-                        </div>
 
-                        {/* Panel derecho: resultados + código */}
-                        <div className="basler-panel">
-                            <div className="basler-panel-header">
-                                <span>🎯 {t('calResults')}</span>
-                            </div>
+                            </div>{/* /capture-panel */}
+                        </div>{/* /preview-main-layout */}
 
-                            {!calResult ? (
-                                <div className="basler-empty-state">
-                                    <div className="basler-empty-icon">
-                                        <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
-                                            <circle cx="28" cy="28" r="24" stroke="#30363d" strokeWidth="2" />
-                                            <circle cx="28" cy="28" r="12" stroke="#30363d" strokeWidth="1.5" strokeDasharray="5 3" />
-                                            <line x1="28" y1="8" x2="28" y2="48" stroke="#30363d" strokeWidth="1" strokeDasharray="3 3" />
-                                            <line x1="8" y1="28" x2="48" y2="28" stroke="#30363d" strokeWidth="1" strokeDasharray="3 3" />
-                                            <circle cx="28" cy="28" r="3" fill="#30363d" />
-                                        </svg>
-                                    </div>
-                                    <p>{t('calNoResult')}</p>
-                                    <span>{t('calNoResultSub')}</span>
-                                </div>
-                            ) : (
-                                <div className="basler-config-form">
-                                    {/* RMS Badge */}
-                                    <div className="cal-rms-badge" style={{
-                                        background: calResult.rms < 0.5 ? 'rgba(0,255,100,0.08)' : calResult.rms < 1.0 ? 'rgba(255,165,0,0.08)' : 'rgba(255,68,68,0.08)',
-                                        border: `1px solid ${calResult.rms < 0.5 ? '#00ff64' : calResult.rms < 1.0 ? '#ffa500' : '#ff4444'}`,
-                                        borderRadius: 8,
-                                        padding: '12px 16px',
-                                        marginBottom: 16,
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: 12,
-                                    }}>
-                                        <span style={{ fontSize: '2rem' }}>
-                                            {calResult.rms < 0.5 ? '✅' : calResult.rms < 1.0 ? '⚠️' : '❌'}
-                                        </span>
-                                        <div>
-                                            <div style={{
-                                                fontFamily: 'monospace', fontSize: '1.3rem', fontWeight: 'bold',
-                                                color: calResult.rms < 0.5 ? '#00ff64' : calResult.rms < 1.0 ? '#ffa500' : '#ff4444'
-                                            }}>
-                                                RMS = {calResult.rms.toFixed(4)} px
-                                            </div>
-                                            <div style={{ fontSize: '0.75rem', color: '#8b949e' }}>
-                                                {calResult.rms < 0.5 ? t('calRmsGood') : calResult.rms < 1.0 ? t('calRmsMed') : t('calRmsBad')} · {calResult.image_count} {t('calImagesUsed')}
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {/* Matriz intrínseca */}
-                                    <div className="basler-panel-header" style={{ marginBottom: 8, fontSize: '0.78rem' }}>
-                                        <span>🔭 {t('calIntrinsic')}</span>
-                                    </div>
-                                    <div className="cal-matrix">
-                                        <div className="cal-matrix-grid">
-                                            <div className="cal-cell mono">fx = {calResult.fx.toFixed(2)}</div>
-                                            <div className="cal-cell mono">0</div>
-                                            <div className="cal-cell mono">cx = {calResult.cx.toFixed(2)}</div>
-                                            <div className="cal-cell mono">0</div>
-                                            <div className="cal-cell mono">fy = {calResult.fy.toFixed(2)}</div>
-                                            <div className="cal-cell mono">cy = {calResult.cy.toFixed(2)}</div>
-                                            <div className="cal-cell mono">0</div>
-                                            <div className="cal-cell mono">0</div>
-                                            <div className="cal-cell mono">1</div>
-                                        </div>
-                                    </div>
-
-                                    {/* Distorsión */}
-                                    <div className="basler-panel-header" style={{ margin: '12px 0 8px', fontSize: '0.78rem' }}>
-                                        <span>🌀 {t('calDistortion')}</span>
-                                    </div>
-                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
-                                        {[['k1', calResult.k1], ['k2', calResult.k2], ['k3', calResult.k3], ['p1', calResult.p1], ['p2', calResult.p2]].map(([name, val]) => (
-                                            <div key={name as string} className="cal-dist-chip">
-                                                <span className="cal-dist-name">{name as string}</span>
-                                                <span className="cal-dist-val">{(val as number).toFixed(6)}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-
-                                    {/* Código Python generado */}
-                                    <div className="basler-code-preview" style={{ marginTop: 16 }}>
-                                        <div className="code-preview-header">⌨ Python / OpenCV — Undistort</div>
-                                        <pre className="code-preview-content">{`import cv2
-import numpy as np
-
-# Intrinsic Matrix
-camera_matrix = np.array([
-    [${calResult.fx.toFixed(2)}, 0,           ${calResult.cx.toFixed(2)}],
-    [0,           ${calResult.fy.toFixed(2)}, ${calResult.cy.toFixed(2)}],
-    [0,           0,           1           ]
-])
-
-# Distortion Coefficients [k1, k2, p1, p2, k3]
-dist_coeffs = np.array([
-    [${calResult.k1.toFixed(6)},
-     ${calResult.k2.toFixed(6)},
-     ${calResult.p1.toFixed(6)},
-     ${calResult.p2.toFixed(6)},
-     ${calResult.k3.toFixed(6)}]
-])
-
-# Undistort a frame
-h, w = frame.shape[:2]
-new_mtx, roi = cv2.getOptimalNewCameraMatrix(
-    camera_matrix, dist_coeffs, (w, h), 1, (w, h))
-undistorted = cv2.undistort(
-    frame, camera_matrix, dist_coeffs,
-    None, new_mtx)`}</pre>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
                     </div>
                 )}
 
