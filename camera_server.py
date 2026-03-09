@@ -8,8 +8,9 @@ Arranca un servidor HTTP en http://localhost:8765 que:
   POST /api/disconnect      → detener grabación y cerrar
   GET  /api/stream          → MJPEG stream (imagen real o simulada)
   GET  /api/snapshot        → JPEG único (para debug)
-  GET  /api/calibration/capture   → captura frame y detecta esquinas del tablero
-  POST /api/calibration/compute   → calibra con las imágenes guardadas
+  GET  /api/calibration/capture       → captura frame y detecta esquinas del tablero
+  GET  /api/calibration/preview       → sirve una imagen original o corregida como JPEG
+  POST /api/calibration/compute       → calibra, guarda corrected/ y pattern/ subcarpetas
 
 Dependencias:
   pip install pypylon opencv-python
@@ -679,6 +680,44 @@ class CameraHandler(BaseHTTPRequestHandler):
                 "corners_found": bool(corners_found),
             })
 
+        # ── /api/calibration/preview — sirve imagen original o corregida como PNG
+        elif path == "/api/calibration/preview":
+            import os
+            query    = parse_qs(parsed.query)
+            img_path = query.get("path", [""])[0]
+            mode     = query.get("mode", ["original"])[0]  # 'original' | 'corrected' | 'pattern'
+
+            if not img_path or not os.path.isfile(img_path):
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            img = cv2.imread(img_path)
+            if img is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            # Redimensionar para el preview (máx 800px de ancho)
+            h, w = img.shape[:2]
+            if w > 800:
+                scale = 800 / w
+                img = cv2.resize(img, (800, int(h * scale)))
+
+            ret, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+            if not ret:
+                self.send_response(500)
+                self.end_headers()
+                return
+
+            data = bytes(buf)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_cors()
+            self.end_headers()
+            self.wfile.write(data)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -778,6 +817,57 @@ class CameraHandler(BaseHTTPRequestHandler):
                 k1, k2, p1, p2, k3 = [float(x) for x in dist_coeffs.ravel()[:5]]
 
                 print(f"[INFO] Calibración OK: RMS={rms:.4f} imgs={len(obj_points)}")
+
+                # ── Guardar imágenes corregidas y con patrón dibujado ──────────
+                corrected_dir = os.path.join(save_dir, "corrected")
+                pattern_dir   = os.path.join(save_dir, "pattern")
+                os.makedirs(corrected_dir, exist_ok=True)
+                os.makedirs(pattern_dir,   exist_ok=True)
+
+                saved_corrected = []
+                saved_pattern   = []
+
+                for img_path in images:
+                    img_bgr = cv2.imread(img_path)
+                    if img_bgr is None:
+                        continue
+                    h, w = img_bgr.shape[:2]
+                    fname = os.path.basename(img_path)
+
+                    # --- Imagen corregida (undistort) ---
+                    new_mtx, roi = cv2.getOptimalNewCameraMatrix(
+                        camera_matrix, dist_coeffs, (w, h), 1, (w, h)
+                    )
+                    undist = cv2.undistort(img_bgr, camera_matrix, dist_coeffs, None, new_mtx)
+                    # Recortar al ROI válido
+                    rx, ry, rw, rh = roi
+                    if rw > 0 and rh > 0:
+                        undist = undist[ry:ry+rh, rx:rx+rw]
+                    corr_path = os.path.join(corrected_dir, fname)
+                    cv2.imwrite(corr_path, undist)
+                    saved_corrected.append(fname)
+
+                    # --- Imagen original con patrón dibujado ---
+                    gray_p  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+                    found_p, corners_p = cv2.findChessboardCorners(
+                        gray_p, (cols, rows),
+                        cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+                    )
+                    pat_img = img_bgr.copy()
+                    if found_p:
+                        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                        corners2p = cv2.cornerSubPix(gray_p, corners_p, (11, 11), (-1, -1), criteria)
+                        cv2.drawChessboardCorners(pat_img, (cols, rows), corners2p, found_p)
+                    # Añadir texto RMS en la imagen
+                    cv2.putText(pat_img, f"RMS={rms:.4f}", (12, 36),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 64), 2, cv2.LINE_AA)
+                    pat_path = os.path.join(pattern_dir, fname)
+                    cv2.imwrite(pat_path, pat_img)
+                    saved_pattern.append(fname)
+
+                print(f"[INFO] Guardadas {len(saved_corrected)} imágenes corregidas en: {corrected_dir}")
+                print(f"[INFO] Guardadas {len(saved_pattern)} imágenes con patrón en:  {pattern_dir}")
+
                 self._json_response({
                     "ok": True,
                     "result": {
@@ -788,6 +878,10 @@ class CameraHandler(BaseHTTPRequestHandler):
                         "p1": p1, "p2": p2,
                         "k3": k3,
                         "image_count": len(obj_points),
+                        "corrected_dir": corrected_dir,
+                        "pattern_dir":   pattern_dir,
+                        "corrected_files": saved_corrected,
+                        "pattern_files":   saved_pattern,
                     }
                 })
             except Exception as e:

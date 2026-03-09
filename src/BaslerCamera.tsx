@@ -174,7 +174,13 @@ export default function BaslerCamera() {
         cx: number; cy: number;
         k1: number; k2: number; p1: number; p2: number; k3: number;
         image_count: number;
+        corrected_dir?: string;
+        pattern_dir?: string;
+        corrected_files?: string[];
+        pattern_files?: string[];
     } | null>(null);
+    const [calPreviewIdx, setCalPreviewIdx] = useState(0);
+    const [calPreviewMode, setCalPreviewMode] = useState<'pattern' | 'corrected'>('pattern');
     const [calCapturing, setCalCapturing] = useState(false);
     const [calComputing, setCalComputing] = useState(false);
     const [calMsg, setCalMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -666,6 +672,8 @@ export default function BaslerCamera() {
         setCalImages([]);
         setCalResult(null);
         setCalMsg(null);
+        setCalPreviewIdx(0);
+        setCalPreviewMode('pattern');
     };
 
     const tabs: { id: typeof activeTab; label: string }[] = [
@@ -1654,7 +1662,7 @@ ${tlConfig.enablePersistentIp ? `
                                             <div className="basler-code-preview">
                                                 <div className="code-preview-header">{String.fromCodePoint(0x2328)} Python / OpenCV &mdash; Undistort</div>
                                                 <pre className="code-preview-content">{
-`import cv2, numpy as np
+                                                    `import cv2, numpy as np
 
 camera_matrix = np.array([
     [${calResult.fx.toFixed(2)}, 0, ${calResult.cx.toFixed(2)}],
@@ -1668,6 +1676,109 @@ new_mtx, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w,h), 
 undistorted   = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_mtx)`
                                                 }</pre>
                                             </div>
+
+                                            {/* ─── Visor comparativo: Patrón vs Corregida ─── */}
+                                            {calResult.corrected_files && calResult.corrected_files.length > 0 && (
+                                                <div style={{ marginTop: 16 }}>
+                                                    {/* Cabecera del visor */}
+                                                    <div className="basler-panel-header" style={{ marginBottom: 8, fontSize: '0.76rem' }}>
+                                                        <span>🖼 Comparación: Patrón vs Corregida</span>
+                                                        <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
+                                                            <button
+                                                                className={`basler-tab-mini ${calPreviewMode === 'pattern' ? 'active' : ''}`}
+                                                                style={calPreviewMode === 'pattern' ? { background: '#a78bfa20', color: '#a78bfa', borderColor: '#a78bfa' } : {}}
+                                                                onClick={() => setCalPreviewMode('pattern')}>
+                                                                🔲 Patrón
+                                                            </button>
+                                                            <button
+                                                                className={`basler-tab-mini ${calPreviewMode === 'corrected' ? 'active' : ''}`}
+                                                                style={calPreviewMode === 'corrected' ? { background: '#00ff6420', color: '#00ff64', borderColor: '#00ff64' } : {}}
+                                                                onClick={() => setCalPreviewMode('corrected')}>
+                                                                ✅ Corregida
+                                                            </button>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Visor de imágenes */}
+                                                    <div style={{ position: 'relative', background: '#0d1117', borderRadius: 8, overflow: 'hidden', border: '1px solid #30363d' }}>
+                                                        {(() => {
+                                                            const files = calPreviewMode === 'pattern' ? calResult.pattern_files! : calResult.corrected_files!;
+                                                            const dir = calPreviewMode === 'pattern' ? calResult.pattern_dir! : calResult.corrected_dir!;
+                                                            const idx = Math.min(calPreviewIdx, files.length - 1);
+                                                            const fname = files[idx] ?? '';
+                                                            const imgPath = dir + '\\' + fname;
+                                                            const url = `${BACKEND}/api/calibration/preview?path=${encodeURIComponent(imgPath)}&t=${Date.now()}`;
+
+                                                            return (
+                                                                <>
+                                                                    <img
+                                                                        src={url}
+                                                                        alt={`${calPreviewMode} ${fname}`}
+                                                                        style={{ width: '100%', display: 'block', maxHeight: 320, objectFit: 'contain' }}
+                                                                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                                                    />
+                                                                    {/* Overlay inferior de modo y contador */}
+                                                                    <div style={{
+                                                                        position: 'absolute', bottom: 8, left: 8,
+                                                                        background: calPreviewMode === 'corrected' ? 'rgba(0,255,100,0.15)' : 'rgba(167,139,250,0.15)',
+                                                                        border: `1px solid ${calPreviewMode === 'corrected' ? '#00ff64' : '#a78bfa'}`,
+                                                                        borderRadius: 5, padding: '3px 8px',
+                                                                        fontSize: '0.7rem', fontFamily: 'monospace',
+                                                                        color: calPreviewMode === 'corrected' ? '#00ff64' : '#a78bfa',
+                                                                        pointerEvents: 'none',
+                                                                    }}>
+                                                                        {calPreviewMode === 'corrected' ? '✅ Corregida' : '🔲 Patrón'} — {fname}
+                                                                    </div>
+                                                                    <div style={{
+                                                                        position: 'absolute', bottom: 8, right: 8,
+                                                                        background: 'rgba(0,0,0,0.8)', borderRadius: 5, padding: '3px 8px',
+                                                                        fontSize: '0.7rem', fontFamily: 'monospace', color: '#8b949e',
+                                                                        pointerEvents: 'none',
+                                                                    }}>
+                                                                        {idx + 1} / {files.length}
+                                                                    </div>
+                                                                </>
+                                                            );
+                                                        })()}
+                                                    </div>
+
+                                                    {/* Controles de navegación y paginación */}
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                                                        <button className="basler-btn disconnect small" style={{ flex: '0 0 auto', padding: '4px 12px' }}
+                                                            onClick={() => setCalPreviewIdx(i => Math.max(0, i - 1))}
+                                                            disabled={calPreviewIdx === 0}>
+                                                            ◀
+                                                        </button>
+                                                        <div style={{ flex: 1, display: 'flex', gap: 4, overflowX: 'auto', padding: '2px 0' }}>
+                                                            {(calResult.corrected_files ?? []).map((_, i) => (
+                                                                <button key={i}
+                                                                    className="basler-tab-mini"
+                                                                    style={{
+                                                                        flexShrink: 0, minWidth: 28, padding: '2px 6px',
+                                                                        background: i === calPreviewIdx ? '#a78bfa20' : '',
+                                                                        borderColor: i === calPreviewIdx ? '#a78bfa' : '',
+                                                                        color: i === calPreviewIdx ? '#a78bfa' : '',
+                                                                    }}
+                                                                    onClick={() => setCalPreviewIdx(i)}>
+                                                                    {i + 1}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                        <button className="basler-btn disconnect small" style={{ flex: '0 0 auto', padding: '4px 12px' }}
+                                                            onClick={() => setCalPreviewIdx(i => Math.min((calResult.corrected_files?.length ?? 1) - 1, i + 1))}
+                                                            disabled={calPreviewIdx >= (calResult.corrected_files?.length ?? 1) - 1}>
+                                                            ▶
+                                                        </button>
+                                                    </div>
+
+                                                    {/* Directorios de almacenamiento */}
+                                                    <div style={{ marginTop: 8, fontSize: '0.68rem', color: '#484f58', fontFamily: 'monospace', lineHeight: 1.8 }}>
+                                                        <div>📁 pattern/: <span style={{ color: '#8b949e' }}>{calResult.pattern_dir}</span></div>
+                                                        <div>📁 corrected/: <span style={{ color: '#8b949e' }}>{calResult.corrected_dir}</span></div>
+                                                    </div>
+                                                </div>
+                                            )}
+
                                         </div>
                                     </div>
                                 ) : (
