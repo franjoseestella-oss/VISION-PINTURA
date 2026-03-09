@@ -162,6 +162,30 @@ export default function BaslerCamera() {
     const [isPanning, setIsPanning] = useState(false);
     const panStart = useRef({ mx: 0, my: 0, px: 0, py: 0 });
     const streamWrapRef = useRef<HTMLDivElement>(null);
+    const handleStreamClick = (e: React.MouseEvent<HTMLImageElement>) => {
+        if (!measureActive) return;
+        const img = e.currentTarget;
+        const rect = img.getBoundingClientRect();
+        const nw = img.naturalWidth || config.width;
+        const nh = img.naturalHeight || config.height;
+        const scale = Math.min(rect.width / nw, rect.height / nh);
+        const dispW = nw * scale;
+        const dispH = nh * scale;
+        const offX = (rect.width - dispW) / 2;
+        const offY = (rect.height - dispH) / 2;
+        const cx = e.clientX - rect.left - offX;
+        const cy = e.clientY - rect.top - offY;
+        if (cx >= 0 && cx <= dispW && cy >= 0 && cy <= dispH) {
+            const ox = (cx / dispW) * nw;
+            const oy = (cy / dispH) * nh;
+            setMeasurePoints(prev => {
+                const next = [...prev, {x: ox, y: oy}];
+                if (next.length > 2) return [{x: ox, y: oy}];
+                return next;
+            });
+        }
+    };
+
     const [panelOpen, setPanelOpen] = useState(true);
     // ── Calibración de cámara ─────────────────────────────────────────────────
     const [calCols, setCalCols] = useState(9);         // esquinas internas X
@@ -183,6 +207,11 @@ export default function BaslerCamera() {
     const [calPreviewMode, setCalPreviewMode] = useState<'pattern' | 'corrected'>('pattern');
     const [calActive, setCalActive] = useState(false);
     const [calActiveRms, setCalActiveRms] = useState<number | null>(null);
+    const [measureActive, setMeasureActive] = useState(false);
+    const [measurePoints, setMeasurePoints] = useState<{x: number, y: number}[]>([]);
+    const [measureRatioMmPx, setMeasureRatioMmPx] = useState<number>(1); // mm por pixel
+    const [inputMeasureMm, setInputMeasureMm] = useState<string>("100.0"); // mm de referencia input
+
     const [calCapturing, setCalCapturing] = useState(false);
     const [calComputing, setCalComputing] = useState(false);
     const [calMsg, setCalMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -1378,7 +1407,7 @@ ${tlConfig.enablePersistentIp ? `
                                         <img
                                             key={streamKey}
                                             src={`http://127.0.0.1:8765/api/stream?t=${streamKey}`}
-                                            alt="Basler MJPEG Stream"
+                                            alt="Basler MJPEG Stream" onClick={handleStreamClick} 
                                             className="stream-zoom-img"
                                             draggable={false}
                                             style={{
@@ -1597,6 +1626,37 @@ ${tlConfig.enablePersistentIp ? `
                                         <button className="basler-tab-mini" style={{ marginLeft: 'auto', borderColor: '#ff444450', color: '#ff4444' }} onClick={handleCalRemove}>🗑 Quitar</button>
                                     </div>
                                 )}
+                                
+                                {/* ── PANEL DE MEDICIÓN ── */}
+                                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, background: measureActive ? '#1f6feb15' : '#0d1117', border: `1px solid ${measureActive ? '#1f6feb50' : '#30363d'}`, padding: '6px 12px', borderRadius: 6 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <button className={`basler-tab-mini ${measureActive ? 'active' : ''}`} style={measureActive ? {borderColor: '#1f6feb', color: '#1f6feb'} : {}} onClick={() => { setMeasureActive(!measureActive); setMeasurePoints([]); }}>
+                                            📏 {measureActive ? 'Medición Activa (Click 2 ptos)' : 'Medir (OpenCV / Pixel)'}
+                                        </button>
+                                        {measurePoints.length === 2 && (() => {
+                                            const distPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
+                                            const realDist = (distPx * measureRatioMmPx).toFixed(2);
+                                            return (
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginLeft: 'auto', fontSize: '0.8rem' }}>
+                                                    <span style={{color: '#8b949e'}}>{distPx.toFixed(1)} px</span>
+                                                    <strong style={{color: '#00ff64', fontSize: '0.9rem'}}>⇿ {realDist} mm</strong>
+                                                </div>
+                                            );
+                                        })()}
+                                    </div>
+                                    {measureActive && measurePoints.length === 2 && (
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.75rem', marginTop: 4 }}>
+                                            <span style={{ color: '#8b949e' }}>Calibrar medida real (mm):</span>
+                                            <input type="number" step="1" className="basler-input" style={{ width: 70, padding: '2px 4px', fontSize: '0.75rem' }} value={inputMeasureMm} onChange={e => setInputMeasureMm(e.target.value)} />
+                                            <button className="basler-tab-mini" style={{ padding: '2px 6px' }} onClick={() => {
+                                                const distPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
+                                                const ref = parseFloat(inputMeasureMm);
+                                                if (distPx > 0 && ref > 0) setMeasureRatioMmPx(ref / distPx);
+                                            }}>Ajustar Escala</button>
+                                        </div>
+                                    )}
+                                </div>
+
 
                                 {calActive && (
                                     <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, background: '#00ff6415', border: '1px solid #00ff6450', padding: '6px 12px', borderRadius: 6, fontSize: '0.78rem', color: '#00ff64' }}>
@@ -1604,6 +1664,37 @@ ${tlConfig.enablePersistentIp ? `
                                         <button className="basler-tab-mini" style={{ marginLeft: 'auto', borderColor: '#ff444450', color: '#ff4444' }} onClick={handleCalRemove}>🗑 Quitar</button>
                                     </div>
                                 )}
+                                
+                                {/* ── PANEL DE MEDICIÓN ── */}
+                                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, background: measureActive ? '#1f6feb15' : '#0d1117', border: `1px solid ${measureActive ? '#1f6feb50' : '#30363d'}`, padding: '6px 12px', borderRadius: 6 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <button className={`basler-tab-mini ${measureActive ? 'active' : ''}`} style={measureActive ? {borderColor: '#1f6feb', color: '#1f6feb'} : {}} onClick={() => { setMeasureActive(!measureActive); setMeasurePoints([]); }}>
+                                            📏 {measureActive ? 'Medición Activa (Click 2 ptos)' : 'Medir (OpenCV / Pixel)'}
+                                        </button>
+                                        {measurePoints.length === 2 && (() => {
+                                            const distPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
+                                            const realDist = (distPx * measureRatioMmPx).toFixed(2);
+                                            return (
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginLeft: 'auto', fontSize: '0.8rem' }}>
+                                                    <span style={{color: '#8b949e'}}>{distPx.toFixed(1)} px</span>
+                                                    <strong style={{color: '#00ff64', fontSize: '0.9rem'}}>⇿ {realDist} mm</strong>
+                                                </div>
+                                            );
+                                        })()}
+                                    </div>
+                                    {measureActive && measurePoints.length === 2 && (
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.75rem', marginTop: 4 }}>
+                                            <span style={{ color: '#8b949e' }}>Calibrar medida real (mm):</span>
+                                            <input type="number" step="1" className="basler-input" style={{ width: 70, padding: '2px 4px', fontSize: '0.75rem' }} value={inputMeasureMm} onChange={e => setInputMeasureMm(e.target.value)} />
+                                            <button className="basler-tab-mini" style={{ padding: '2px 6px' }} onClick={() => {
+                                                const distPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
+                                                const ref = parseFloat(inputMeasureMm);
+                                                if (distPx > 0 && ref > 0) setMeasureRatioMmPx(ref / distPx);
+                                            }}>Ajustar Escala</button>
+                                        </div>
+                                    )}
+                                </div>
+
 
                                 {/* Stream MJPEG â€” idÃ©ntico al del Preview tab */}
                                 <div className="stream-zoom-wrap" style={{ cursor: 'default', minHeight: 340 }}>
@@ -1611,7 +1702,7 @@ ${tlConfig.enablePersistentIp ? `
                                         <img
                                             key={streamKey}
                                             src={`http://127.0.0.1:8765/api/stream?t=${streamKey}`}
-                                            alt="Calibration MJPEG Stream"
+                                            alt="Calibration MJPEG Stream" onClick={handleStreamClick} 
                                             className="stream-zoom-img"
                                             draggable={false}
                                             style={{ transform: 'none', objectFit: 'contain' }}
