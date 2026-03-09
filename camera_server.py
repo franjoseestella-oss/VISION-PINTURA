@@ -8,6 +8,12 @@ Arranca un servidor HTTP en http://localhost:8765 que:
   POST /api/disconnect      → detener grabación y cerrar
   GET  /api/stream          → MJPEG stream (imagen real o simulada)
   GET  /api/snapshot        → JPEG único (para debug)
+  GET  /api/calibration/capture       → captura frame y detecta esquinas del tablero
+  GET  /api/calibration/preview       → sirve una imagen original o corregida como JPEG
+  POST /api/calibration/compute       → calibra, guarda corrected/ y pattern/ subcarpetas
+  GET  /api/calibration/status        → estado de calibración cargada
+  POST /api/calibration/apply         → guarda la calibración para aplicarla siempre
+  POST /api/calibration/clear         → elimina la calibración guardada
 
 Dependencias:
   pip install pypylon opencv-python
@@ -16,13 +22,15 @@ Dependencias:
 Si pypylon NO está instalado, entra en modo SIMULADO automáticamente.
 """
 
+import os
+import glob
 import json
 import time
 import threading
 import io
 import struct
 import traceback
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 # ── Intentar importar pypylon ────────────────────────────────────────────────
@@ -33,6 +41,7 @@ try:
     PYLON_AVAILABLE = True
     print("[INFO] pypylon detectado — modo REAL activado")
 except ImportError:
+    import cv2
     PYLON_AVAILABLE = False
     import numpy as np
     print("[WARN] pypylon NO instalado — modo SIMULADO activado")
@@ -54,7 +63,200 @@ camera_lock = threading.Lock()
 current_camera = None          # pypylon InstantCamera instance
 current_frame = None           # numpy array BGR
 last_frame_time = time.time()
+
 frame_lock = threading.Lock()
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Estado de calibración permanente
+# ════════════════════════════════════════════════════════════════════════════
+CALIBRATION_FILE = "camera_calibration.json"
+calibration_data = {
+    "active": False,
+    "matrix": None,
+    "dist": None,
+    "new_mtx": None,
+    "roi": None,
+    "map1": None,
+    "map2": None,
+    "rms": 0.0
+}
+
+def load_calibration():
+    global calibration_data
+    if os.path.exists(CALIBRATION_FILE):
+        try:
+            import json
+            import numpy as np
+            with open(CALIBRATION_FILE, "r") as f:
+                data = json.load(f)
+            if "matrix" in data and "dist" in data:
+                calibration_data["matrix"] = np.array(data["matrix"])
+                calibration_data["dist"] = np.array(data["dist"])
+                calibration_data["rms"] = data.get("rms", 0.0)
+                calibration_data["active"] = True
+                calibration_data["map1"] = None
+                calibration_data["map2"] = None
+                print(f"[INFO] Calibración cargada automáticamente: RMS={calibration_data['rms']}")
+        except Exception as e:
+            print(f"[ERROR] No se pudo cargar {CALIBRATION_FILE}: {e}")
+
+def apply_calibration(frame):
+    global calibration_data
+    if not calibration_data["active"]:
+        return frame
+    
+    import cv2
+    import numpy as np
+    h, w = frame.shape[:2]
+    # Iniciar mapas lazily
+    if calibration_data["map1"] is None or calibration_data["map1"].shape[:2] != (h, w):
+        cam_mtx = calibration_data["matrix"]
+        dist = calibration_data["dist"]
+        new_mtx, roi = cv2.getOptimalNewCameraMatrix(cam_mtx, dist, (w, h), 1, (w, h))
+        map1, map2 = cv2.initUndistortRectifyMap(cam_mtx, dist, None, new_mtx, (w, h), cv2.CV_16SC2)
+        calibration_data["new_mtx"] = new_mtx
+        calibration_data["roi"] = roi
+        calibration_data["map1"] = map1
+        calibration_data["map2"] = map2
+
+    mapped = cv2.remap(frame, calibration_data["map1"], calibration_data["map2"], cv2.INTER_LINEAR)
+    return mapped
+
+load_calibration()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Estado y funciones de grabación de vídeo
+# ════════════════════════════════════════════════════════════════════════════
+
+recorder_state = {
+    "recording": False,
+    "path": "",
+    "filename": "",
+    "start_time": 0.0,
+    "frames_written": 0,
+    "fps": 10.0,
+    "error": "",
+}
+recorder_lock = threading.Lock()
+_video_writer = None          # cv2.VideoWriter instance
+_recorder_thread = None
+
+
+def start_recording(params: dict) -> dict:
+    """Inicia la grabación de vídeo en un hilo dedicado."""
+    global _video_writer, _recorder_thread
+
+    import os
+    save_dir  = params.get("dir", "C:\\Videos_Basler")
+    filename  = params.get("filename", "")
+    fps_rec   = float(params.get("fps", 10.0))
+    codec     = params.get("codec", "MJPG")   # MJPG → .avi  |  mp4v → .mp4
+
+    # Extensión según codec
+    ext = ".mp4" if codec.lower() in ("mp4v", "h264", "avc1") else ".avi"
+
+    if not filename:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        sn = camera_state.get("serial", "cam") or "cam"
+        filename = f"basler_{sn}_{ts}{ext}"
+    elif not (filename.lower().endswith(".avi") or filename.lower().endswith(".mp4")):
+        filename += ext
+
+    # Crear directorio
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+    except Exception as e:
+        return {"ok": False, "error": f"No se pudo crear directorio: {e}"}
+
+    save_path = os.path.join(save_dir, filename)
+
+    # Tamaño del frame actual
+    with frame_lock:
+        frame_sample = current_frame
+    if frame_sample is None:
+        # Frame negro de referencia
+        frame_sample = np.zeros((1200, 1920, 3), dtype=np.uint8)
+
+    h, w = frame_sample.shape[:2]
+
+    fourcc = cv2.VideoWriter_fourcc(*codec)
+    writer = cv2.VideoWriter(save_path, fourcc, fps_rec, (w, h))
+    if not writer.isOpened():
+        # Fallback: intentar con MJPG
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+        filename_avi = os.path.splitext(filename)[0] + ".avi"
+        save_path    = os.path.join(save_dir, filename_avi)
+        filename     = filename_avi
+        writer = cv2.VideoWriter(save_path, fourcc, fps_rec, (w, h))
+        if not writer.isOpened():
+            return {"ok": False, "error": "No se pudo abrir VideoWriter (OpenCV)"}
+
+    with recorder_lock:
+        recorder_state.update({
+            "recording": True,
+            "path": save_path,
+            "filename": filename,
+            "start_time": time.time(),
+            "frames_written": 0,
+            "fps": fps_rec,
+            "error": "",
+        })
+    _video_writer = writer
+
+    # Hilo de escritura de frames
+    def _write_loop():
+        global _video_writer
+        delay = 1.0 / fps_rec
+        print(f"[INFO] Grabación iniciada → {save_path}  @{fps_rec}fps")
+        while True:
+            with recorder_lock:
+                if not recorder_state["recording"]:
+                    break
+            with frame_lock:
+                frame = current_frame
+            if frame is not None:
+                # Resize si el frame no coincide con el tamaño del writer
+                if frame.shape[0] != h or frame.shape[1] != w:
+                    frame = cv2.resize(frame, (w, h))
+                if _video_writer and _video_writer.isOpened():
+                    _video_writer.write(frame)
+                    with recorder_lock:
+                        recorder_state["frames_written"] += 1
+            time.sleep(delay)
+        if _video_writer:
+            _video_writer.release()
+            _video_writer = None
+        print(f"[INFO] Grabación detenida → {save_path}")
+
+    _recorder_thread = threading.Thread(target=_write_loop, daemon=True)
+    _recorder_thread.start()
+    return {"ok": True, "path": save_path, "filename": filename, "fps": fps_rec}
+
+
+def stop_recording() -> dict:
+    """Detiene la grabación y cierra el VideoWriter."""
+    with recorder_lock:
+        if not recorder_state["recording"]:
+            return {"ok": False, "error": "No hay grabación activa"}
+        recorder_state["recording"] = False
+        path    = recorder_state["path"]
+        fname   = recorder_state["filename"]
+        nframes = recorder_state["frames_written"]
+        elapsed = time.time() - recorder_state["start_time"]
+    # Esperar a que el hilo cierre el writer
+    if _recorder_thread:
+        _recorder_thread.join(timeout=3)
+    import os
+    size_mb = round(os.path.getsize(path) / (1024 * 1024), 2) if os.path.exists(path) else 0
+    return {
+        "ok": True,
+        "path": path,
+        "filename": fname,
+        "frames_written": nframes,
+        "duration_s": round(elapsed, 1),
+        "size_mb": size_mb,
+    }
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -108,7 +310,7 @@ def connect_camera(params: dict) -> dict:
                 "status": "connected",
                 "model": "acA1920-48gm (SIMULADO)",
                 "serial": "40002788",
-                "ip": "192.168.0.200",
+                "ip": "192.168.0.201",
                 "firmware": "V1.1-0",
                 "error": "",
             })
@@ -237,8 +439,9 @@ def _grab_frames(cam):
             if grab_result.GrabSucceeded():
                 img = converter.Convert(grab_result)
                 arr = img.GetArray()   # numpy BGR
+                arr_corrected = apply_calibration(arr.copy())
                 with frame_lock:
-                    current_frame = arr.copy()
+                    current_frame = arr_corrected
                     camera_state["frame_count"] += 1
                 fps_counter += 1
                 now = time.time()
@@ -290,7 +493,7 @@ def _simulate_frames(params):
         # Overlay de texto
         cv2.putText(frame, f"SIMULADO - SN:40002788", (10, 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 100), 1)
-        cv2.putText(frame, f"IP:192.168.0.200  {W}x{H}", (10, 40),
+        cv2.putText(frame, f"IP:192.168.0.201  {W}x{H}", (10, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
         cv2.putText(frame, f"Exp:{int(exposure)}us Gain:{gain}", (10, 56),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
@@ -298,8 +501,9 @@ def _simulate_frames(params):
         cv2.line(frame, (cx, 0), (cx, H), (0, 200, 80), 1)
         cv2.line(frame, (0, cy), (W, cy), (0, 200, 80), 1)
 
+        frame_corrected = apply_calibration(frame)
         with frame_lock:
-            current_frame = frame
+            current_frame = frame_corrected
             camera_state["frame_count"] += 1
         t += 0.35
         fps_counter += 1
@@ -325,7 +529,6 @@ def get_jpeg_frame(quality=80):
         cv2.putText(frame, "Sin señal — conecta la cámara", (80, 200),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (60, 60, 60), 2)
     try:
-        import cv2
         ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
         if ret:
             return bytes(buf)
@@ -363,6 +566,15 @@ class CameraHandler(BaseHTTPRequestHandler):
             self._json_response(camera_state)
 
         # ── /api/devices
+
+        # ── /api/calibration/status
+        elif path == "/api/calibration/status":
+            self._json_response({
+                "ok": True, 
+                "active": calibration_data["active"],
+                "rms": calibration_data["rms"] if calibration_data["active"] else None
+            })
+
         elif path == "/api/devices":
             devs = enumerate_devices()
             self._json_response({"devices": devs, "pylon": PYLON_AVAILABLE})
@@ -385,7 +597,7 @@ class CameraHandler(BaseHTTPRequestHandler):
                         self.wfile.write(header + jpg + b"\r\n")
                         self.wfile.flush()
                     time.sleep(1.0 / 25)  # max 25fps stream al browser
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass  # cliente desconectado
 
         # ── /api/snapshot
@@ -397,6 +609,189 @@ class CameraHandler(BaseHTTPRequestHandler):
             self.send_cors()
             self.end_headers()
             self.wfile.write(jpg)
+
+        # ── /api/snapshot_save — Guarda foto en disco
+        elif path == "/api/snapshot_save":
+            import os
+            query = parse_qs(parsed.query)
+            save_dir = query.get("dir", [""])[0]
+            custom_name = query.get("filename", [""])[0]
+
+            if not save_dir:
+                self._json_response({"ok": False, "error": "Falta el parámetro 'dir'"})
+                return
+
+            # Crear directorio si no existe
+            try:
+                os.makedirs(save_dir, exist_ok=True)
+            except Exception as e:
+                self._json_response({"ok": False, "error": f"No se pudo crear el directorio: {e}"})
+                return
+
+            # Nombre automático con timestamp
+            if not custom_name:
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                sn = camera_state.get("serial", "cam") or "cam"
+                custom_name = f"basler_{sn}_{ts}.jpg"
+            elif not custom_name.lower().endswith(".jpg"):
+                custom_name += ".jpg"
+
+            save_path = os.path.join(save_dir, custom_name)
+
+            jpg = get_jpeg_frame(quality=95)
+            if not jpg:
+                self._json_response({"ok": False, "error": "Sin frame disponible. ¿Está la cámara conectada?"})
+                return
+
+            try:
+                with open(save_path, "wb") as f:
+                    f.write(jpg)
+                print(f"[INFO] Foto guardada: {save_path}")
+                self._json_response({
+                    "ok": True,
+                    "path": save_path,
+                    "filename": custom_name,
+                    "size_kb": round(len(jpg) / 1024, 1),
+                })
+            except Exception as e:
+                self._json_response({"ok": False, "error": f"Error al guardar: {e}"})
+
+        # ── /api/record/status
+        elif path == "/api/record/status":
+            with recorder_lock:
+                state_copy = dict(recorder_state)
+            if state_copy["recording"]:
+                state_copy["elapsed_s"] = round(time.time() - state_copy["start_time"], 1)
+            else:
+                state_copy["elapsed_s"] = 0
+            self._json_response(state_copy)
+
+        # ── /api/scan_plc
+        elif path == "/api/scan_plc":
+            query = parse_qs(parsed.query)
+            ip = query.get("ip", [""])[0]
+            port = int(query.get("port", ["9600"])[0])
+            if ip:
+                import socket
+                import os
+                import platform
+                
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(0.5)
+                tcp_open = (sock.connect_ex((ip, port)) == 0)
+                sock.close()
+                
+                param = '-n' if platform.system().lower() == 'windows' else '-c'
+                cmd = f"ping {param} 1 -w 500 {ip} > nul 2>&1" if platform.system().lower() == 'windows' else f"ping {param} 1 -W 1 {ip} > /dev/null 2>&1"
+                alive = (os.system(cmd) == 0)
+                
+                self.send_response(200)
+                self.send_cors()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True, "ip": ip, "alive": alive, "tcp_open": tcp_open}).encode())
+            else:
+                self.send_response(400)
+                self.send_cors()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok": False, "error": "No IP"}')
+
+        # ── /api/calibration/capture — captura frame y detecta esquinas
+        elif path == "/api/calibration/capture":
+            import os, glob
+            query = parse_qs(parsed.query)
+            save_dir = query.get("dir", [""])[0]
+            cols     = int(query.get("cols", ["9"])[0])
+            rows     = int(query.get("rows", ["6"])[0])
+
+            if not save_dir:
+                self._json_response({"ok": False, "error": "Falta el parámetro 'dir'"})
+                return
+
+            try:
+                os.makedirs(save_dir, exist_ok=True)
+            except Exception as e:
+                self._json_response({"ok": False, "error": f"No se pudo crear el directorio: {e}"})
+                return
+
+            with frame_lock:
+                frame = current_frame
+
+            if frame is None:
+                self._json_response({"ok": False, "error": "Sin frame disponible. ¿Está la cámara conectada?"})
+                return
+
+            # Nombre de archivo secuencial
+            existing = glob.glob(os.path.join(save_dir, "cal_*.jpg"))
+            idx = len(existing) + 1
+            filename = f"cal_{idx:04d}.jpg"
+            save_path = os.path.join(save_dir, filename)
+
+            # Guardar imagen
+            try:
+                ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                if ret:
+                    with open(save_path, 'wb') as f:
+                        f.write(bytes(buf))
+                else:
+                    raise RuntimeError("imencode falló")
+            except Exception as e:
+                self._json_response({"ok": False, "error": f"Error al guardar imagen: {e}"})
+                return
+
+            # Detectar esquinas del tablero
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+            corners_found, _ = cv2.findChessboardCorners(
+                gray, (cols, rows),
+                cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+            )
+
+            print(f"[INFO] Cal capture: {filename}  corners={bool(corners_found)}")
+            self._json_response({
+                "ok": True,
+                "filename": filename,
+                "path": save_path,
+                "corners_found": bool(corners_found),
+            })
+
+        # ── /api/calibration/preview — sirve imagen original o corregida como PNG
+        elif path == "/api/calibration/preview":
+            import os
+            query    = parse_qs(parsed.query)
+            img_path = query.get("path", [""])[0]
+            mode     = query.get("mode", ["original"])[0]  # 'original' | 'corrected' | 'pattern'
+
+            if not img_path or not os.path.isfile(img_path):
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            img = cv2.imread(img_path)
+            if img is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            # Redimensionar para el preview (máx 800px de ancho)
+            h, w = img.shape[:2]
+            if w > 800:
+                scale = 800 / w
+                img = cv2.resize(img, (800, int(h * scale)))
+
+            ret, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+            if not ret:
+                self.send_response(500)
+                self.end_headers()
+                return
+
+            data = bytes(buf)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_cors()
+            self.end_headers()
+            self.wfile.write(data)
 
         else:
             self.send_response(404)
@@ -412,10 +807,183 @@ class CameraHandler(BaseHTTPRequestHandler):
         except Exception:
             params = {}
 
+
+
+        # ── /api/calibration/apply
+        if path == "/api/calibration/apply":
+            try:
+                # Requires 'matrix' (3x3 array), 'dist' (1x5 array), and 'rms'
+                with open(CALIBRATION_FILE, "w") as f:
+                    json.dump(params, f, indent=4)
+                load_calibration()
+                self._json_response({"ok": True})
+            except Exception as e:
+                self._json_response({"ok": False, "error": str(e)})
+
+        # ── /api/calibration/clear
+        elif path == "/api/calibration/clear":
+            global calibration_data
+            if os.path.exists(CALIBRATION_FILE):
+                try:
+                    os.remove(CALIBRATION_FILE)
+                except Exception:
+                    pass
+            calibration_data["active"] = False
+            self._json_response({"ok": True})
+
         # ── /api/connect
         if path == "/api/connect":
             result = connect_camera(params)
             self._json_response(result)
+
+        # ── /api/record/start
+        elif path == "/api/record/start":
+            with recorder_lock:
+                already = recorder_state["recording"]
+            if already:
+                self._json_response({"ok": False, "error": "Ya hay una grabación activa"})
+                return
+            result = start_recording(params)
+            self._json_response(result)
+
+        # ── /api/record/stop
+        elif path == "/api/record/stop":
+            result = stop_recording()
+            self._json_response(result)
+
+        # ── /api/calibration/compute — calibra cámara con las imágenes
+        elif path == "/api/calibration/compute":
+            import os, glob
+
+            save_dir  = params.get("dir", "")
+            cols      = int(params.get("cols", 9))
+            rows      = int(params.get("rows", 6))
+            square_mm = float(params.get("square_mm", 25.0))
+
+            if not save_dir:
+                self._json_response({"ok": False, "error": "Falta el parámetro 'dir'"})
+                return
+
+            images = sorted(glob.glob(os.path.join(save_dir, "cal_*.jpg")))
+            if len(images) < 4:
+                self._json_response({"ok": False, "error": f"Se necesitan al menos 4 imágenes, solo hay {len(images)}"})
+                return
+
+            # Puntos 3D del tablero (en mm)
+            objp = np.zeros((rows * cols, 3), np.float32)
+            objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * square_mm
+
+            obj_points = []  # puntos 3D reales
+            img_points = []  # puntos 2D en imagen
+            img_shape  = None
+
+            for img_path in images:
+                img  = cv2.imread(img_path)
+                if img is None:
+                    continue
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                img_shape = gray.shape[::-1]
+
+                found, corners = cv2.findChessboardCorners(
+                    gray, (cols, rows),
+                    cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+                )
+
+                if found:
+                    # Refinar esquinas
+                    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                    corners2 = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+                    obj_points.append(objp)
+                    img_points.append(corners2)
+
+            if len(obj_points) < 4:
+                self._json_response({
+                    "ok": False,
+                    "error": f"Solo {len(obj_points)} imágenes con esquinas detectadas. Se necesitan al menos 4."
+                })
+                return
+
+            try:
+                rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
+                    obj_points, img_points, img_shape, None, None
+                )
+
+                fx = float(camera_matrix[0, 0])
+                fy = float(camera_matrix[1, 1])
+                cx = float(camera_matrix[0, 2])
+                cy = float(camera_matrix[1, 2])
+                k1, k2, p1, p2, k3 = [float(x) for x in dist_coeffs.ravel()[:5]]
+
+                print(f"[INFO] Calibración OK: RMS={rms:.4f} imgs={len(obj_points)}")
+
+                # ── Guardar imágenes corregidas y con patrón dibujado ──────────
+                corrected_dir = os.path.join(save_dir, "corrected")
+                pattern_dir   = os.path.join(save_dir, "pattern")
+                os.makedirs(corrected_dir, exist_ok=True)
+                os.makedirs(pattern_dir,   exist_ok=True)
+
+                saved_corrected = []
+                saved_pattern   = []
+
+                for img_path in images:
+                    img_bgr = cv2.imread(img_path)
+                    if img_bgr is None:
+                        continue
+                    h, w = img_bgr.shape[:2]
+                    fname = os.path.basename(img_path)
+
+                    # --- Imagen corregida (undistort) ---
+                    new_mtx, roi = cv2.getOptimalNewCameraMatrix(
+                        camera_matrix, dist_coeffs, (w, h), 1, (w, h)
+                    )
+                    undist = cv2.undistort(img_bgr, camera_matrix, dist_coeffs, None, new_mtx)
+                    # Recortar al ROI válido
+                    rx, ry, rw, rh = roi
+                    if rw > 0 and rh > 0:
+                        undist = undist[ry:ry+rh, rx:rx+rw]
+                    corr_path = os.path.join(corrected_dir, fname)
+                    cv2.imwrite(corr_path, undist)
+                    saved_corrected.append(fname)
+
+                    # --- Imagen original con patrón dibujado ---
+                    gray_p  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+                    found_p, corners_p = cv2.findChessboardCorners(
+                        gray_p, (cols, rows),
+                        cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+                    )
+                    pat_img = img_bgr.copy()
+                    if found_p:
+                        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                        corners2p = cv2.cornerSubPix(gray_p, corners_p, (11, 11), (-1, -1), criteria)
+                        cv2.drawChessboardCorners(pat_img, (cols, rows), corners2p, found_p)
+                    # Añadir texto RMS en la imagen
+                    cv2.putText(pat_img, f"RMS={rms:.4f}", (12, 36),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 64), 2, cv2.LINE_AA)
+                    pat_path = os.path.join(pattern_dir, fname)
+                    cv2.imwrite(pat_path, pat_img)
+                    saved_pattern.append(fname)
+
+                print(f"[INFO] Guardadas {len(saved_corrected)} imágenes corregidas en: {corrected_dir}")
+                print(f"[INFO] Guardadas {len(saved_pattern)} imágenes con patrón en:  {pattern_dir}")
+
+                self._json_response({
+                    "ok": True,
+                    "result": {
+                        "rms": round(rms, 6),
+                        "fx": fx, "fy": fy,
+                        "cx": cx, "cy": cy,
+                        "k1": k1, "k2": k2,
+                        "p1": p1, "p2": p2,
+                        "k3": k3,
+                        "image_count": len(obj_points),
+                        "corrected_dir": corrected_dir,
+                        "pattern_dir":   pattern_dir,
+                        "corrected_files": saved_corrected,
+                        "pattern_files":   saved_pattern,
+                    }
+                })
+            except Exception as e:
+                self._json_response({"ok": False, "error": f"cv2.calibrateCamera falló: {e}"})
 
         # ── /api/disconnect
         elif path == "/api/disconnect":
@@ -465,9 +1033,10 @@ if __name__ == "__main__":
             print("\n[ERROR] opencv-python no instalado.")
             print("  Instala con:  pip install opencv-python\n")
 
-    server = HTTPServer(("0.0.0.0", PORT), CameraHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), CameraHandler)
     print(f"\n[INFO] Servidor escuchando en puerto {PORT}...")
-    print("[INFO] Presiona Ctrl+C para detener.\n")
+    print("[INFO] Presiona Ctrl+C para detener.")
+    print("[INFO] Conecta la cámara desde la interfaz web.\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

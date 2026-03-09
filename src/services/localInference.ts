@@ -1,12 +1,9 @@
-
 const LOCAL_URL = "http://localhost:5000";
 
-// Interface for local server response
-interface LocalInferenceResponse {
-    predictions: Array<any>;
-    image: { width: number, height: number };
-    error?: string;
-}
+export const initLocalInference = async (_modelUrl: string) => {
+    // throw new Error("Local inference is not fully implemented in this prototype.");
+    console.log("Mock setup for local model initialized.");
+};
 
 export const loadLocalModel = async (model: File | string) => {
     try {

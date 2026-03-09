@@ -1,8 +1,4 @@
 
-
-
-const validProjects = ['frontales-mg', 'frantal_mg', 'frontalmg']; // Filter based on inspection
-
 export interface RoboflowProjectClasses {
     id: string;
     name: string;

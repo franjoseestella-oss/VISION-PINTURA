@@ -3024,10 +3024,11 @@ input:checked+.slider:before {
 .basler-preview-section {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 16px;
   width: 100%;
+  flex: 1;
+  min-height: 0;
 }
 
 .basler-preview-header {
@@ -3035,7 +3036,7 @@ input:checked+.slider:before {
   justify-content: space-between;
   align-items: center;
   width: 100%;
-  max-width: 640px;
+  flex-shrink: 0;
 }
 
 .preview-info {
@@ -3071,8 +3072,7 @@ input:checked+.slider:before {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  justify-content: center;
-  max-width: 640px;
+  flex-shrink: 0;
 }
 
 .metric-chip {
@@ -3083,4 +3083,563 @@ input:checked+.slider:before {
   font-size: 0.75rem;
   font-family: monospace;
   color: #cdd9e5;
+}
+
+/* ── Preview: layout 2 columnas ────────────────────── */
+.preview-main-layout {
+  display: flex;
+  gap: 16px;
+  width: 100%;
+  flex: 1;
+  align-items: flex-start;
+  min-height: 0;
+}
+
+.preview-stream-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ── Contenedor del stream con zoom ────────────────────── */
+.stream-zoom-wrap {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: #000;
+  border-radius: 8px;
+  border: 1px solid #30363d;
+  box-shadow: 0 0 0 1px #00ff6420, 0 8px 32px rgba(0, 0, 0, 0.6);
+  min-height: 420px;
+  max-height: calc(100vh - 260px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+.stream-zoom-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transition: transform 0.08s ease-out;
+  pointer-events: none;
+}
+
+/* Badge flotante con el % de zoom */
+.zoom-overlay-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+  border: 1px solid #00ff6440;
+  color: #00ff64;
+  font-family: monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 20px;
+  pointer-events: none;
+  letter-spacing: 0.5px;
+}
+
+/* ── Barra de zoom ─────────────────────────────────── */
+.zoom-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 6px 12px;
+  flex-shrink: 0;
+}
+
+.zoom-btn {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #c9d1d9;
+  font-size: 1rem;
+  font-weight: 700;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.zoom-btn:hover {
+  background: #30363d;
+  border-color: #00ff6460;
+  color: #00ff64;
+}
+
+.zoom-btn.zoom-reset {
+  color: #79c0ff;
+  border-color: #79c0ff40;
+}
+
+.zoom-btn.panel-toggle-btn {
+  color: #8b949e;
+  font-size: 1.1rem;
+}
+
+.zoom-slider {
+  flex: 1;
+  height: 4px;
+  accent-color: #00ff64;
+  cursor: pointer;
+}
+
+.zoom-label {
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: #00ff64;
+  font-weight: 700;
+  min-width: 42px;
+  text-align: center;
+}
+
+/* ── Panel de captura ───────────────────────────────── */
+.capture-panel {
+  width: 300px;
+  flex-shrink: 0;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+.capture-panel::-webkit-scrollbar {
+  width: 6px;
+}
+
+.capture-panel::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 10px 0;
+}
+
+.capture-panel::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 6px;
+}
+
+.capture-panel::-webkit-scrollbar-thumb:hover {
+  background: #484f58;
+}
+
+/* ── Selector de tipo (Mastil / Bastidor) ───────────── */
+.target-selector {
+  display: flex;
+  background: #0d1117;
+  border-radius: 6px;
+  border: 1px solid #30363d;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+.target-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  font-weight: 700;
+  font-size: 0.8rem;
+  padding: 8px 0;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.target-btn:hover {
+  color: #c9d1d9;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.target-btn.active {
+  background: #238636;
+  color: #fff;
+}
+
+
+.capture-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #e6edf3;
+  border-bottom: 1px solid #30363d;
+  padding-bottom: 12px;
+}
+
+.capture-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.capture-field label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.capture-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 0.82rem !important;
+  font-family: 'Cascadia Code', 'Fira Code', monospace !important;
+  padding: 8px 10px !important;
+}
+
+.basler-btn.capture-btn {
+  width: 100%;
+  background: linear-gradient(135deg, #00c853, #00ff64);
+  color: #0d1117;
+  font-weight: 800;
+  font-size: 1rem;
+  letter-spacing: 0.5px;
+  border: none;
+  border-radius: 8px;
+  padding: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-shadow: 0 4px 16px rgba(0, 255, 100, 0.25);
+}
+
+.basler-btn.capture-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 22px rgba(0, 255, 100, 0.4);
+}
+
+.basler-btn.capture-btn:disabled {
+  background: #21262d;
+  color: #484f58;
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.basler-btn.capture-btn.loading {
+  background: #21262d;
+  color: #8b949e;
+}
+
+/* Mensaje resultado */
+.capture-result {
+  border-radius: 6px;
+  padding: 9px 12px;
+  font-size: 0.78rem;
+  font-family: monospace;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.capture-result.ok {
+  background: rgba(0, 255, 100, 0.08);
+  border: 1px solid rgba(0, 255, 100, 0.3);
+  color: #00ff64;
+}
+
+.capture-result.err {
+  background: rgba(255, 68, 68, 0.08);
+  border: 1px solid rgba(255, 68, 68, 0.3);
+  color: #ff6b6b;
+}
+
+/* Galería sesión */
+.capture-gallery {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.capture-gallery-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #21262d;
+}
+
+.capture-gallery-item {
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  transition: border-color 0.15s;
+}
+
+.capture-gallery-item:hover {
+  border-color: #00ff6440;
+}
+
+.gallery-item-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+
+.gallery-filename {
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: #79c0ff;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+
+.gallery-meta {
+  font-size: 0.7rem;
+  color: #484f58;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.gallery-item-path {
+  font-family: monospace;
+  font-size: 0.67rem;
+  color: #3d444d;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Separador entre secciones del panel ──────────────── */
+.capture-divider {
+  height: 1px;
+  background: #21262d;
+  margin: 4px 0;
+}
+
+/* ── Botón REC (rojo) ─────────────────────────────────── */
+.basler-btn.rec-btn {
+  width: 100%;
+  background: linear-gradient(135deg, #c0392b, #ff4444);
+  color: #fff;
+  font-weight: 800;
+  font-size: 0.95rem;
+  letter-spacing: 0.5px;
+  border: none;
+  border-radius: 8px;
+  padding: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-shadow: 0 4px 16px rgba(255, 68, 68, 0.25);
+}
+
+.basler-btn.rec-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 22px rgba(255, 68, 68, 0.45);
+}
+
+.basler-btn.rec-btn:disabled {
+  background: #21262d;
+  color: #484f58;
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ── Botón STOP grabación ────────────────────────────── */
+.basler-btn.rec-stop-btn {
+  width: 100%;
+  background: #21262d;
+  color: #ff4444;
+  font-weight: 800;
+  font-size: 0.95rem;
+  letter-spacing: 0.5px;
+  border: 2px solid #ff4444;
+  border-radius: 8px;
+  padding: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-shadow: 0 0 12px rgba(255, 68, 68, 0.2);
+  animation: rec-glow 1.2s ease-in-out infinite alternate;
+}
+
+.basler-btn.rec-stop-btn:hover {
+  background: rgba(255, 68, 68, 0.12);
+}
+
+@keyframes rec-glow {
+  from {
+    box-shadow: 0 0 8px rgba(255, 68, 68, 0.2);
+  }
+
+  to {
+    box-shadow: 0 0 20px rgba(255, 68, 68, 0.55);
+  }
+}
+
+/* ── Indicador REC parpadeante ───────────────────────── */
+.rec-blink {
+  animation: rec-blink 1s step-start infinite;
+  color: #ff4444;
+  font-weight: 800;
+  font-family: monospace;
+  letter-spacing: 0.5px;
+}
+
+@keyframes rec-blink {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* ── Fila opciones FPS + Codec ───────────────────────── */
+.rec-options-row {
+  display: flex;
+  gap: 10px;
+}
+
+/* ══════════════════════════════════════════════════════
+   CAMERA CALIBRATION TAB
+   ══════════════════════════════════════════════════════ */
+
+/* Tab badge especial */
+.basler-tab.cal-tab {
+  border-color: transparent;
+  position: relative;
+}
+.basler-tab.cal-tab.active {
+  border-bottom-color: #a78bfa;
+  color: #a78bfa;
+}
+.basler-tab.cal-tab:hover:not(.active) {
+  color: #c4b5fd;
+}
+
+/* Lista de imágenes capturadas */
+.cal-images-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.cal-images-list::-webkit-scrollbar {
+  width: 5px;
+}
+.cal-images-list::-webkit-scrollbar-track { background: transparent; }
+.cal-images-list::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+
+.cal-image-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid #21262d;
+  font-family: monospace;
+  transition: border-color 0.15s;
+}
+.cal-image-item.ok {
+  background: rgba(0, 255, 100, 0.04);
+  border-color: rgba(0, 255, 100, 0.18);
+  color: #00ff64;
+}
+.cal-image-item.warn {
+  background: rgba(255, 165, 0, 0.05);
+  border-color: rgba(255, 165, 0, 0.2);
+  color: #ffa500;
+}
+
+/* Matriz intrínseca 3×3 */
+.cal-matrix {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.cal-matrix-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.cal-cell {
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 4px;
+  padding: 7px 6px;
+  text-align: center;
+  font-size: 0.78rem;
+  color: #79c0ff;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+/* Chips de coeficientes de distorsión */
+.cal-dist-chip {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.cal-dist-name {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cal-dist-val {
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.72rem;
+  color: #d2a8ff;
+  font-weight: 600;
 }

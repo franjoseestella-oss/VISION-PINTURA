@@ -1,5 +1,4 @@
-
-const API_URL = "https://serverless.roboflow.com";
+// const API_URL = "https://serverless.roboflow.com";
 const API_KEY = import.meta.env.VITE_ROBOFLOW_API_KEY || "";
 const WORKSPACE_NAME = "welding-hqci3";
 const WORKFLOW_ID = "frontalmg";
@@ -22,7 +21,7 @@ export interface RoboflowWorkflowResponse {
     [key: string]: any;
 }
 
-export const runRoboflowWorkflow = async (base64Data: string, mimeType: string, imageDims?: { width: number, height: number }) => {
+export const runRoboflowWorkflow = async (base64Data: string, _mimeType: string, imageDims?: { width: number, height: number }) => {
     // 1. Try Workflow Endpoint via Local Proxy (Bypasses CORS/Auth issues with private keys)
     try {
         const proxyUrl = `${LOCAL_URL}/roboflow-proxy`;
