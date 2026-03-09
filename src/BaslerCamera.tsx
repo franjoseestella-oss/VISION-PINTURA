@@ -181,6 +181,8 @@ export default function BaslerCamera() {
     } | null>(null);
     const [calPreviewIdx, setCalPreviewIdx] = useState(0);
     const [calPreviewMode, setCalPreviewMode] = useState<'pattern' | 'corrected'>('pattern');
+    const [calActive, setCalActive] = useState(false);
+    const [calActiveRms, setCalActiveRms] = useState<number | null>(null);
     const [calCapturing, setCalCapturing] = useState(false);
     const [calComputing, setCalComputing] = useState(false);
     const [calMsg, setCalMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -232,6 +234,13 @@ export default function BaslerCamera() {
                 const data = await r.json();
                 setServerFps(data.fps ?? 0);
                 setServerFrames(data.frame_count ?? 0);
+
+                const rc = await fetch(`${BACKEND}/api/calibration/status`);
+                if (rc.ok) {
+                    const dcal = await rc.json();
+                    setCalActive(dcal.active);
+                    setCalActiveRms(dcal.rms);
+                }
             } catch { /* ignore */ }
         }, 1000);
         return () => clearInterval(interval);
@@ -668,6 +677,46 @@ export default function BaslerCamera() {
     };
 
     // ── Calibración: limpiar imágenes ─────────────────────────────────────────
+    const handleCalApply = async () => {
+        if (!calResult) return;
+        try {
+            const r = await fetch(`${BACKEND}/api/calibration/apply`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    matrix: [
+                        [calResult.fx, 0, calResult.cx],
+                        [0, calResult.fy, calResult.cy],
+                        [0, 0, 1]
+                    ],
+                    dist: [[calResult.k1, calResult.k2, calResult.p1, calResult.p2, calResult.k3]],
+                    rms: calResult.rms
+                })
+            });
+            const data = await r.json();
+            if (data.ok) {
+                setCalActive(true);
+                setCalActiveRms(calResult.rms);
+                log('success', `💾 Calibración activada permanentemente (RMS: ${calResult.rms.toFixed(4)}).`);
+            } else {
+                log('error', `Error al aplicar calibración: ${data.error}`);
+            }
+        } catch (e) {
+            log('error', 'Error aplicando calibración.');
+        }
+    };
+
+    const handleCalRemove = async () => {
+        try {
+            const r = await fetch(`${BACKEND}/api/calibration/clear`, { method: 'POST' });
+            if (r.ok) {
+                setCalActive(false);
+                setCalActiveRms(null);
+                log('info', '🗑 Calibración eliminada del servidor.');
+            }
+        } catch (e) { /* ignore */ }
+    };
+
     const handleCalClear = () => {
         setCalImages([]);
         setCalResult(null);
@@ -1248,6 +1297,11 @@ ${tlConfig.enablePersistentIp ? `
                                         {serverFps > 0 ? `${serverFps} fps · frame #${serverFrames}` : t('connStream')}
                                     </span>
                                 )}
+                                {calActive && (
+                                    <span style={{ marginLeft: 8, background: '#a78bfa20', border: '1px solid #a78bfa50', padding: '2px 8px', borderRadius: 4, color: '#c4b5fd', fontSize: '0.75rem' }}>
+                                        ✨ Calibración Activa
+                                    </span>
+                                )}
                             </div>
 
                             {/* ── Selector de tipo de captura (Mástil/Bastidor) ── */}
@@ -1537,6 +1591,20 @@ ${tlConfig.enablePersistentIp ? `
                                     </span>
                                 </div>
 
+                                {calActive && (
+                                    <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, background: '#00ff6415', border: '1px solid #00ff6450', padding: '6px 12px', borderRadius: 6, fontSize: '0.78rem', color: '#00ff64' }}>
+                                        <span>✨ Filtro Calibración Activo (RMS {calActiveRms?.toFixed(4)})</span>
+                                        <button className="basler-tab-mini" style={{ marginLeft: 'auto', borderColor: '#ff444450', color: '#ff4444' }} onClick={handleCalRemove}>🗑 Quitar</button>
+                                    </div>
+                                )}
+
+                                {calActive && (
+                                    <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, background: '#00ff6415', border: '1px solid #00ff6450', padding: '6px 12px', borderRadius: 6, fontSize: '0.78rem', color: '#00ff64' }}>
+                                        <span>✨ Filtro Calibración Activo (RMS {calActiveRms?.toFixed(4)})</span>
+                                        <button className="basler-tab-mini" style={{ marginLeft: 'auto', borderColor: '#ff444450', color: '#ff4444' }} onClick={handleCalRemove}>🗑 Quitar</button>
+                                    </div>
+                                )}
+
                                 {/* Stream MJPEG â€” idÃ©ntico al del Preview tab */}
                                 <div className="stream-zoom-wrap" style={{ cursor: 'default', minHeight: 340 }}>
                                     {backendOk ? (
@@ -1775,6 +1843,15 @@ undistorted   = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_mtx)`
                                                     <div style={{ marginTop: 8, fontSize: '0.68rem', color: '#484f58', fontFamily: 'monospace', lineHeight: 1.8 }}>
                                                         <div>📁 pattern/: <span style={{ color: '#8b949e' }}>{calResult.pattern_dir}</span></div>
                                                         <div>📁 corrected/: <span style={{ color: '#8b949e' }}>{calResult.corrected_dir}</span></div>
+                                                    </div>
+                                                    
+                                                    <div style={{ marginTop: 16 }}>
+                                                        <button 
+                                                            className="basler-btn connect" 
+                                                            style={{ width: '100%', padding: '10px', fontSize: '0.85rem' }}
+                                                            onClick={handleCalApply}>
+                                                            💾 Guardar y Aplicar Calibración al Stream
+                                                        </button>
                                                     </div>
                                                 </div>
                                             )}

@@ -11,6 +11,9 @@ Arranca un servidor HTTP en http://localhost:8765 que:
   GET  /api/calibration/capture       → captura frame y detecta esquinas del tablero
   GET  /api/calibration/preview       → sirve una imagen original o corregida como JPEG
   POST /api/calibration/compute       → calibra, guarda corrected/ y pattern/ subcarpetas
+  GET  /api/calibration/status        → estado de calibración cargada
+  POST /api/calibration/apply         → guarda la calibración para aplicarla siempre
+  POST /api/calibration/clear         → elimina la calibración guardada
 
 Dependencias:
   pip install pypylon opencv-python
@@ -58,7 +61,66 @@ camera_lock = threading.Lock()
 current_camera = None          # pypylon InstantCamera instance
 current_frame = None           # numpy array BGR
 last_frame_time = time.time()
+
 frame_lock = threading.Lock()
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Estado de calibración permanente
+# ════════════════════════════════════════════════════════════════════════════
+CALIBRATION_FILE = "camera_calibration.json"
+calibration_data = {
+    "active": False,
+    "matrix": None,
+    "dist": None,
+    "new_mtx": None,
+    "roi": None,
+    "map1": None,
+    "map2": None,
+    "rms": 0.0
+}
+
+def load_calibration():
+    global calibration_data
+    if os.path.exists(CALIBRATION_FILE):
+        try:
+            import json
+            import numpy as np
+            with open(CALIBRATION_FILE, "r") as f:
+                data = json.load(f)
+            if "matrix" in data and "dist" in data:
+                calibration_data["matrix"] = np.array(data["matrix"])
+                calibration_data["dist"] = np.array(data["dist"])
+                calibration_data["rms"] = data.get("rms", 0.0)
+                calibration_data["active"] = True
+                calibration_data["map1"] = None
+                calibration_data["map2"] = None
+                print(f"[INFO] Calibración cargada automáticamente: RMS={calibration_data['rms']}")
+        except Exception as e:
+            print(f"[ERROR] No se pudo cargar {CALIBRATION_FILE}: {e}")
+
+def apply_calibration(frame):
+    global calibration_data
+    if not calibration_data["active"]:
+        return frame
+    
+    import cv2
+    import numpy as np
+    h, w = frame.shape[:2]
+    # Iniciar mapas lazily
+    if calibration_data["map1"] is None or calibration_data["map1"].shape[:2] != (h, w):
+        cam_mtx = calibration_data["matrix"]
+        dist = calibration_data["dist"]
+        new_mtx, roi = cv2.getOptimalNewCameraMatrix(cam_mtx, dist, (w, h), 1, (w, h))
+        map1, map2 = cv2.initUndistortRectifyMap(cam_mtx, dist, None, new_mtx, (w, h), cv2.CV_16SC2)
+        calibration_data["new_mtx"] = new_mtx
+        calibration_data["roi"] = roi
+        calibration_data["map1"] = map1
+        calibration_data["map2"] = map2
+
+    mapped = cv2.remap(frame, calibration_data["map1"], calibration_data["map2"], cv2.INTER_LINEAR)
+    return mapped
+
+load_calibration()
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -375,8 +437,9 @@ def _grab_frames(cam):
             if grab_result.GrabSucceeded():
                 img = converter.Convert(grab_result)
                 arr = img.GetArray()   # numpy BGR
+                arr_corrected = apply_calibration(arr.copy())
                 with frame_lock:
-                    current_frame = arr.copy()
+                    current_frame = arr_corrected
                     camera_state["frame_count"] += 1
                 fps_counter += 1
                 now = time.time()
@@ -436,8 +499,9 @@ def _simulate_frames(params):
         cv2.line(frame, (cx, 0), (cx, H), (0, 200, 80), 1)
         cv2.line(frame, (0, cy), (W, cy), (0, 200, 80), 1)
 
+        frame_corrected = apply_calibration(frame)
         with frame_lock:
-            current_frame = frame
+            current_frame = frame_corrected
             camera_state["frame_count"] += 1
         t += 0.35
         fps_counter += 1
@@ -500,6 +564,15 @@ class CameraHandler(BaseHTTPRequestHandler):
             self._json_response(camera_state)
 
         # ── /api/devices
+
+        # ── /api/calibration/status
+        elif path == "/api/calibration/status":
+            self._json_response({
+                "ok": True, 
+                "active": calibration_data["active"],
+                "rms": calibration_data["rms"] if calibration_data["active"] else None
+            })
+
         elif path == "/api/devices":
             devs = enumerate_devices()
             self._json_response({"devices": devs, "pylon": PYLON_AVAILABLE})
@@ -732,6 +805,29 @@ class CameraHandler(BaseHTTPRequestHandler):
         except Exception:
             params = {}
 
+
+
+        # ── /api/calibration/apply
+        elif path == "/api/calibration/apply":
+            try:
+                # Requires 'matrix' (3x3 array), 'dist' (1x5 array), and 'rms'
+                with open(CALIBRATION_FILE, "w") as f:
+                    json.dump(params, f, indent=4)
+                load_calibration()
+                self._json_response({"ok": True})
+            except Exception as e:
+                self._json_response({"ok": False, "error": str(e)})
+
+        # ── /api/calibration/clear
+        elif path == "/api/calibration/clear":
+            global calibration_data
+            if os.path.exists(CALIBRATION_FILE):
+                try:
+                    os.remove(CALIBRATION_FILE)
+                except Exception:
+                    pass
+            calibration_data["active"] = False
+            self._json_response({"ok": True})
 
         # ── /api/connect
         if path == "/api/connect":
