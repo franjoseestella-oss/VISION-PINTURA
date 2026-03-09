@@ -1442,20 +1442,21 @@ ${tlConfig.enablePersistentIp ? `
                                                 style={{
                                                     transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
                                                     transformOrigin: 'center center',
-                                                    cursor: measureActive ? 'crosshair' : 'grab'
+                                                    cursor: measureActive ? 'crosshair' : 'grab',
+                                                    pointerEvents: measureActive ? 'auto' : 'none'
                                                 }}
                                                 onError={() => log('error', 'Error cargando stream MJPEG')}
                                             />
                                             {measureActive && (
                                                 <svg viewBox={`0 0 ${config.width || 1920} ${config.height || 1080}`} preserveAspectRatio="xMidYMid meet" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)` }}>
                                                     {measurePoints.map((p, i) => (
-                                                        <circle key={i} cx={p.x} cy={p.y} r={(config.width || 1920) / 200} fill="#1f6feb" stroke="#000" strokeWidth={3} />
+                                                        <circle key={i} cx={p.x} cy={p.y} r={(config.width || 1920) / 500} fill="#0d1117" stroke="#00ff64" strokeWidth={(config.width || 1920) / 700} />
                                                     ))}
                                                     {measurePoints.length === 2 && (
-                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measurePoints[1].x} y2={measurePoints[1].y} stroke="#1f6feb" strokeWidth={(config.width || 1920) / 400} strokeDasharray="15,10" />
+                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measurePoints[1].x} y2={measurePoints[1].y} stroke="#00ff64" strokeWidth={(config.width || 1920) / 600} strokeDasharray="10,8" />
                                                     )}
                                                     {measurePoints.length === 1 && measureHover && (
-                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measureHover.x} y2={measureHover.y} stroke="#1f6feb" strokeWidth={(config.width || 1920) / 400} strokeDasharray="15,10" opacity={0.6} />
+                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measureHover.x} y2={measureHover.y} stroke="#00ff64" strokeWidth={(config.width || 1920) / 600} strokeDasharray="10,8" opacity={0.7} />
                                                     )}
                                                 </svg>
                                             )}
@@ -1750,19 +1751,19 @@ ${tlConfig.enablePersistentIp ? `
                                                 alt="Calibration MJPEG Stream" onClick={handleStreamClick} onMouseMove={handleStreamMove} onMouseLeave={handleStreamLeave}
                                                 className="stream-zoom-img"
                                                 draggable={false}
-                                                style={{ transform: 'none', objectFit: 'contain', cursor: measureActive ? 'crosshair' : 'default' }}
+                                                style={{ transform: 'none', objectFit: 'contain', cursor: measureActive ? 'crosshair' : 'default', pointerEvents: measureActive ? 'auto' : 'none' }}
                                                 onError={() => log('error', 'Error cargando stream (calibraciÃ³n)')}
                                             />
                                             {measureActive && (
                                                 <svg viewBox={`0 0 ${config.width || 1920} ${config.height || 1080}`} preserveAspectRatio="xMidYMid meet" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
                                                     {measurePoints.map((p, i) => (
-                                                        <circle key={i} cx={p.x} cy={p.y} r={(config.width || 1920) / 200} fill="#1f6feb" stroke="#000" strokeWidth={3} />
+                                                        <circle key={i} cx={p.x} cy={p.y} r={(config.width || 1920) / 500} fill="#0d1117" stroke="#00ff64" strokeWidth={(config.width || 1920) / 700} />
                                                     ))}
                                                     {measurePoints.length === 2 && (
-                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measurePoints[1].x} y2={measurePoints[1].y} stroke="#1f6feb" strokeWidth={(config.width || 1920) / 400} strokeDasharray="15,10" />
+                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measurePoints[1].x} y2={measurePoints[1].y} stroke="#00ff64" strokeWidth={(config.width || 1920) / 600} strokeDasharray="10,8" />
                                                     )}
                                                     {measurePoints.length === 1 && measureHover && (
-                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measureHover.x} y2={measureHover.y} stroke="#1f6feb" strokeWidth={(config.width || 1920) / 400} strokeDasharray="15,10" opacity={0.6} />
+                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measureHover.x} y2={measureHover.y} stroke="#00ff64" strokeWidth={(config.width || 1920) / 600} strokeDasharray="10,8" opacity={0.7} />
                                                     )}
                                                 </svg>
                                             )}
