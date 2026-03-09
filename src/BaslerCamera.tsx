@@ -179,12 +179,39 @@ export default function BaslerCamera() {
             const ox = (cx / dispW) * nw;
             const oy = (cy / dispH) * nh;
             setMeasurePoints(prev => {
-                const next = [...prev, {x: ox, y: oy}];
-                if (next.length > 2) return [{x: ox, y: oy}];
+                const next = [...prev, { x: ox, y: oy }];
+                if (next.length > 2) return [{ x: ox, y: oy }];
                 return next;
             });
         }
     };
+
+    const handleStreamMove = (e: React.MouseEvent<HTMLImageElement>) => {
+        if (!measureActive || measurePoints.length !== 1) return;
+        const img = e.currentTarget;
+        const rect = img.getBoundingClientRect();
+        const nw = img.naturalWidth || config.width;
+        const nh = img.naturalHeight || config.height;
+        const scale = Math.min(rect.width / nw, rect.height / nh);
+        const dispW = nw * scale;
+        const dispH = nh * scale;
+        const offX = (rect.width - dispW) / 2;
+        const offY = (rect.height - dispH) / 2;
+        const cx = e.clientX - rect.left - offX;
+        const cy = e.clientY - rect.top - offY;
+        if (cx >= 0 && cx <= dispW && cy >= 0 && cy <= dispH) {
+            const ox = (cx / dispW) * nw;
+            const oy = (cy / dispH) * nh;
+            setMeasureHover({ x: ox, y: oy });
+        }
+    };
+
+    const handleStreamLeave = () => {
+        if (measureActive && measurePoints.length === 1) {
+            setMeasureHover(null);
+        }
+    };
+
 
     const [panelOpen, setPanelOpen] = useState(true);
     // ── Calibración de cámara ─────────────────────────────────────────────────
@@ -208,7 +235,8 @@ export default function BaslerCamera() {
     const [calActive, setCalActive] = useState(false);
     const [calActiveRms, setCalActiveRms] = useState<number | null>(null);
     const [measureActive, setMeasureActive] = useState(false);
-    const [measurePoints, setMeasurePoints] = useState<{x: number, y: number}[]>([]);
+    const [measurePoints, setMeasurePoints] = useState<{ x: number, y: number }[]>([]);
+    const [measureHover, setMeasureHover] = useState<{ x: number, y: number } | null>(null);
     const [measureRatioMmPx, setMeasureRatioMmPx] = useState<number>(1); // mm por pixel
     const [inputMeasureMm, setInputMeasureMm] = useState<string>("100.0"); // mm de referencia input
 
@@ -1404,18 +1432,34 @@ ${tlConfig.enablePersistentIp ? `
                                     style={{ cursor: zoomLevel > 1 ? (isPanning ? 'grabbing' : 'grab') : 'default' }}
                                 >
                                     {backendOk ? (
-                                        <img
-                                            key={streamKey}
-                                            src={`http://127.0.0.1:8765/api/stream?t=${streamKey}`}
-                                            alt="Basler MJPEG Stream" onClick={handleStreamClick} 
-                                            className="stream-zoom-img"
-                                            draggable={false}
-                                            style={{
-                                                transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
-                                                transformOrigin: 'center center',
-                                            }}
-                                            onError={() => log('error', 'Error cargando stream MJPEG')}
-                                        />
+                                        <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                            <img
+                                                key={streamKey}
+                                                src={`http://127.0.0.1:8765/api/stream?t=${streamKey}`}
+                                                alt="Basler MJPEG Stream" onClick={handleStreamClick} onMouseMove={handleStreamMove} onMouseLeave={handleStreamLeave}
+                                                className="stream-zoom-img"
+                                                draggable={false}
+                                                style={{
+                                                    transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
+                                                    transformOrigin: 'center center',
+                                                    cursor: measureActive ? 'crosshair' : 'grab'
+                                                }}
+                                                onError={() => log('error', 'Error cargando stream MJPEG')}
+                                            />
+                                            {measureActive && (
+                                                <svg viewBox={`0 0 ${config.width || 1920} ${config.height || 1080}`} preserveAspectRatio="xMidYMid meet" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)` }}>
+                                                    {measurePoints.map((p, i) => (
+                                                        <circle key={i} cx={p.x} cy={p.y} r={(config.width || 1920) / 200} fill="#1f6feb" stroke="#000" strokeWidth={3} />
+                                                    ))}
+                                                    {measurePoints.length === 2 && (
+                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measurePoints[1].x} y2={measurePoints[1].y} stroke="#1f6feb" strokeWidth={(config.width || 1920) / 400} strokeDasharray="15,10" />
+                                                    )}
+                                                    {measurePoints.length === 1 && measureHover && (
+                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measureHover.x} y2={measureHover.y} stroke="#1f6feb" strokeWidth={(config.width || 1920) / 400} strokeDasharray="15,10" opacity={0.6} />
+                                                    )}
+                                                </svg>
+                                            )}
+                                        </div>
                                     ) : (
                                         <canvas
                                             ref={canvasRef} width={640} height={400}
@@ -1626,11 +1670,11 @@ ${tlConfig.enablePersistentIp ? `
                                         <button className="basler-tab-mini" style={{ marginLeft: 'auto', borderColor: '#ff444450', color: '#ff4444' }} onClick={handleCalRemove}>🗑 Quitar</button>
                                     </div>
                                 )}
-                                
+
                                 {/* ── PANEL DE MEDICIÓN ── */}
                                 <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, background: measureActive ? '#1f6feb15' : '#0d1117', border: `1px solid ${measureActive ? '#1f6feb50' : '#30363d'}`, padding: '6px 12px', borderRadius: 6 }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                        <button className={`basler-tab-mini ${measureActive ? 'active' : ''}`} style={measureActive ? {borderColor: '#1f6feb', color: '#1f6feb'} : {}} onClick={() => { setMeasureActive(!measureActive); setMeasurePoints([]); }}>
+                                        <button className={`basler-tab-mini ${measureActive ? 'active' : ''}`} style={measureActive ? { borderColor: '#1f6feb', color: '#1f6feb' } : {}} onClick={() => { setMeasureActive(!measureActive); setMeasurePoints([]); setMeasureHover(null); }}>
                                             📏 {measureActive ? 'Medición Activa (Click 2 ptos)' : 'Medir (OpenCV / Pixel)'}
                                         </button>
                                         {measurePoints.length === 2 && (() => {
@@ -1638,8 +1682,8 @@ ${tlConfig.enablePersistentIp ? `
                                             const realDist = (distPx * measureRatioMmPx).toFixed(2);
                                             return (
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginLeft: 'auto', fontSize: '0.8rem' }}>
-                                                    <span style={{color: '#8b949e'}}>{distPx.toFixed(1)} px</span>
-                                                    <strong style={{color: '#00ff64', fontSize: '0.9rem'}}>⇿ {realDist} mm</strong>
+                                                    <span style={{ color: '#8b949e' }}>{distPx.toFixed(1)} px</span>
+                                                    <strong style={{ color: '#00ff64', fontSize: '0.9rem' }}>⇿ {realDist} mm</strong>
                                                 </div>
                                             );
                                         })()}
@@ -1664,11 +1708,11 @@ ${tlConfig.enablePersistentIp ? `
                                         <button className="basler-tab-mini" style={{ marginLeft: 'auto', borderColor: '#ff444450', color: '#ff4444' }} onClick={handleCalRemove}>🗑 Quitar</button>
                                     </div>
                                 )}
-                                
+
                                 {/* ── PANEL DE MEDICIÓN ── */}
                                 <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, background: measureActive ? '#1f6feb15' : '#0d1117', border: `1px solid ${measureActive ? '#1f6feb50' : '#30363d'}`, padding: '6px 12px', borderRadius: 6 }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                        <button className={`basler-tab-mini ${measureActive ? 'active' : ''}`} style={measureActive ? {borderColor: '#1f6feb', color: '#1f6feb'} : {}} onClick={() => { setMeasureActive(!measureActive); setMeasurePoints([]); }}>
+                                        <button className={`basler-tab-mini ${measureActive ? 'active' : ''}`} style={measureActive ? { borderColor: '#1f6feb', color: '#1f6feb' } : {}} onClick={() => { setMeasureActive(!measureActive); setMeasurePoints([]); setMeasureHover(null); }}>
                                             📏 {measureActive ? 'Medición Activa (Click 2 ptos)' : 'Medir (OpenCV / Pixel)'}
                                         </button>
                                         {measurePoints.length === 2 && (() => {
@@ -1676,8 +1720,8 @@ ${tlConfig.enablePersistentIp ? `
                                             const realDist = (distPx * measureRatioMmPx).toFixed(2);
                                             return (
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginLeft: 'auto', fontSize: '0.8rem' }}>
-                                                    <span style={{color: '#8b949e'}}>{distPx.toFixed(1)} px</span>
-                                                    <strong style={{color: '#00ff64', fontSize: '0.9rem'}}>⇿ {realDist} mm</strong>
+                                                    <span style={{ color: '#8b949e' }}>{distPx.toFixed(1)} px</span>
+                                                    <strong style={{ color: '#00ff64', fontSize: '0.9rem' }}>⇿ {realDist} mm</strong>
                                                 </div>
                                             );
                                         })()}
@@ -1699,15 +1743,30 @@ ${tlConfig.enablePersistentIp ? `
                                 {/* Stream MJPEG â€” idÃ©ntico al del Preview tab */}
                                 <div className="stream-zoom-wrap" style={{ cursor: 'default', minHeight: 340 }}>
                                     {backendOk ? (
-                                        <img
-                                            key={streamKey}
-                                            src={`http://127.0.0.1:8765/api/stream?t=${streamKey}`}
-                                            alt="Calibration MJPEG Stream" onClick={handleStreamClick} 
-                                            className="stream-zoom-img"
-                                            draggable={false}
-                                            style={{ transform: 'none', objectFit: 'contain' }}
-                                            onError={() => log('error', 'Error cargando stream (calibraciÃ³n)')}
-                                        />
+                                        <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                            <img
+                                                key={streamKey}
+                                                src={`http://127.0.0.1:8765/api/stream?t=${streamKey}`}
+                                                alt="Calibration MJPEG Stream" onClick={handleStreamClick} onMouseMove={handleStreamMove} onMouseLeave={handleStreamLeave}
+                                                className="stream-zoom-img"
+                                                draggable={false}
+                                                style={{ transform: 'none', objectFit: 'contain', cursor: measureActive ? 'crosshair' : 'default' }}
+                                                onError={() => log('error', 'Error cargando stream (calibraciÃ³n)')}
+                                            />
+                                            {measureActive && (
+                                                <svg viewBox={`0 0 ${config.width || 1920} ${config.height || 1080}`} preserveAspectRatio="xMidYMid meet" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
+                                                    {measurePoints.map((p, i) => (
+                                                        <circle key={i} cx={p.x} cy={p.y} r={(config.width || 1920) / 200} fill="#1f6feb" stroke="#000" strokeWidth={3} />
+                                                    ))}
+                                                    {measurePoints.length === 2 && (
+                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measurePoints[1].x} y2={measurePoints[1].y} stroke="#1f6feb" strokeWidth={(config.width || 1920) / 400} strokeDasharray="15,10" />
+                                                    )}
+                                                    {measurePoints.length === 1 && measureHover && (
+                                                        <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measureHover.x} y2={measureHover.y} stroke="#1f6feb" strokeWidth={(config.width || 1920) / 400} strokeDasharray="15,10" opacity={0.6} />
+                                                    )}
+                                                </svg>
+                                            )}
+                                        </div>
                                     ) : (
                                         <canvas
                                             ref={canvasRef} width={640} height={400}
@@ -1935,10 +1994,10 @@ undistorted   = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_mtx)`
                                                         <div>📁 pattern/: <span style={{ color: '#8b949e' }}>{calResult.pattern_dir}</span></div>
                                                         <div>📁 corrected/: <span style={{ color: '#8b949e' }}>{calResult.corrected_dir}</span></div>
                                                     </div>
-                                                    
+
                                                     <div style={{ marginTop: 16 }}>
-                                                        <button 
-                                                            className="basler-btn connect" 
+                                                        <button
+                                                            className="basler-btn connect"
                                                             style={{ width: '100%', padding: '10px', fontSize: '0.85rem' }}
                                                             onClick={handleCalApply}>
                                                             💾 Guardar y Aplicar Calibración al Stream
