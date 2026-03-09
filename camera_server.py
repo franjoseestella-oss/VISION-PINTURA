@@ -22,6 +22,8 @@ Dependencias:
 Si pypylon NO está instalado, entra en modo SIMULADO automáticamente.
 """
 
+import os
+import glob
 import json
 import time
 import threading
@@ -808,7 +810,7 @@ class CameraHandler(BaseHTTPRequestHandler):
 
 
         # ── /api/calibration/apply
-        elif path == "/api/calibration/apply":
+        if path == "/api/calibration/apply":
             try:
                 # Requires 'matrix' (3x3 array), 'dist' (1x5 array), and 'rms'
                 with open(CALIBRATION_FILE, "w") as f:
