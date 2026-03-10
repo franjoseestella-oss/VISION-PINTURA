@@ -162,8 +162,8 @@ export default function BaslerCamera() {
     const [isPanning, setIsPanning] = useState(false);
     const panStart = useRef({ mx: 0, my: 0, px: 0, py: 0 });
     const streamWrapRef = useRef<HTMLDivElement>(null);
-    const handleStreamClick = (e: React.MouseEvent<HTMLImageElement>) => {
-        if (!measureActive) return;
+    const handleStreamClick = async (e: React.MouseEvent<HTMLImageElement>) => {
+        if (!measureActive && !segmentActive) return;
         const img = e.currentTarget;
         const rect = img.getBoundingClientRect();
         const nw = img.naturalWidth || config.width;
@@ -178,16 +178,57 @@ export default function BaslerCamera() {
         if (cx >= 0 && cx <= dispW && cy >= 0 && cy <= dispH) {
             const ox = (cx / dispW) * nw;
             const oy = (cy / dispH) * nh;
-            setMeasurePoints(prev => {
-                const next = [...prev, { x: ox, y: oy }];
-                if (next.length > 2) return [{ x: ox, y: oy }];
-                return next;
+
+            if (measureActive) {
+                setMeasurePoints(prev => {
+                    const next = [...prev, { x: ox, y: oy }];
+                    if (next.length > 2) return [{ x: ox, y: oy }];
+                    return next;
+                });
+            } else if (segmentActive) {
+                if (segmentTool === 'point') {
+                    runSegmentation('point', [{ x: ox, y: oy }]);
+                } else if (segmentTool === 'rect' || segmentTool === 'circle') {
+                    setSegmentDrawPoints(prev => {
+                        const next = [...prev, { x: ox, y: oy }];
+                        if (next.length === 2) {
+                            runSegmentation(segmentTool, next);
+                            return [];
+                        }
+                        if (next.length > 2) return [{ x: ox, y: oy }];
+                        return next;
+                    });
+                } else if (segmentTool === 'polygon') {
+                    setSegmentDrawPoints(prev => [...prev, { x: ox, y: oy }]);
+                }
+            }
+        }
+    };
+
+    const runSegmentation = async (method: string, pts: { x: number, y: number }[]) => {
+        setSegmentContour(null);
+        setSegmentResult(null);
+        try {
+            const r = await fetch(`${BACKEND}/api/segment`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ method, points: pts, tolerance: segmentTolerance || 30 })
             });
+            const data = await r.json();
+            if (data.ok && data.contour) {
+                setSegmentContour(data.contour);
+                setSegmentResult({ area_px: data.area_px, cx: data.cx, cy: data.cy });
+                log('success', `🧩 Pieza segmentada. Área: ${Math.round(data.area_px).toLocaleString()} px²`);
+            } else if (data.error) {
+                log('warn', `Segmentación fallida: ${data.error}`);
+            }
+        } catch (err) {
+            log('error', 'Error conectando al servidor para segmentación.');
         }
     };
 
     const handleStreamMove = (e: React.MouseEvent<HTMLImageElement>) => {
-        if (!measureActive || measurePoints.length !== 1) return;
+        if (!measureActive && !(segmentActive && (segmentTool === 'rect' || segmentTool === 'circle' || segmentTool === 'polygon'))) return;
         const img = e.currentTarget;
         const rect = img.getBoundingClientRect();
         const nw = img.naturalWidth || config.width;
@@ -207,9 +248,7 @@ export default function BaslerCamera() {
     };
 
     const handleStreamLeave = () => {
-        if (measureActive && measurePoints.length === 1) {
-            setMeasureHover(null);
-        }
+        setMeasureHover(null);
     };
 
 
@@ -239,6 +278,15 @@ export default function BaslerCamera() {
     const [measureHover, setMeasureHover] = useState<{ x: number, y: number } | null>(null);
     const [measureRatioMmPx, setMeasureRatioMmPx] = useState<number>(1); // mm por pixel
     const [inputMeasureMm, setInputMeasureMm] = useState<string>("100.0"); // mm de referencia input
+
+    // Segmentación
+    const [segmentActive, setSegmentActive] = useState(false);
+    const [segmentTool, setSegmentTool] = useState<'point' | 'rect' | 'circle' | 'polygon'>('point');
+    const [segmentDrawPoints, setSegmentDrawPoints] = useState<{ x: number, y: number }[]>([]);
+    const [segmentContour, setSegmentContour] = useState<{ x: number, y: number }[] | null>(null);
+    const [segmentResult, setSegmentResult] = useState<{ area_px: number, cx: number, cy: number } | null>(null);
+    const [segmentTolerance, setSegmentTolerance] = useState<number | string>(30); // 1-255
+
 
     const [calCapturing, setCalCapturing] = useState(false);
     const [calComputing, setCalComputing] = useState(false);
@@ -863,6 +911,7 @@ export default function BaslerCamera() {
         setCalPreviewIdx(0);
         setCalPreviewMode('pattern');
     };
+
 
     const tabs: { id: typeof activeTab; label: string }[] = [
         { id: 'connection', label: t('tabConn') },
@@ -1557,21 +1606,44 @@ ${tlConfig.enablePersistentIp ? `
                                                 style={{
                                                     transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
                                                     transformOrigin: 'center center',
-                                                    cursor: measureActive ? 'crosshair' : 'grab',
-                                                    pointerEvents: measureActive ? 'auto' : 'none'
+                                                    cursor: measureActive ? 'crosshair' : (segmentActive ? 'cell' : 'grab'),
+                                                    pointerEvents: (measureActive || segmentActive) ? 'auto' : 'none'
                                                 }}
                                                 onError={() => log('error', 'Error cargando stream MJPEG')}
                                             />
-                                            {measureActive && (
+                                            {(measureActive || segmentContour || segmentDrawPoints.length > 0) && (
                                                 <svg viewBox={`0 0 ${config.width || 1920} ${config.height || 1080}`} preserveAspectRatio="xMidYMid meet" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)` }}>
                                                     {measurePoints.map((p, i) => (
-                                                        <circle key={i} cx={p.x} cy={p.y} r={(config.width || 1920) / 500} fill="#0d1117" stroke="#00ff64" strokeWidth={(config.width || 1920) / 700} />
+                                                        <circle key={`m-${i}`} cx={p.x} cy={p.y} r={(config.width || 1920) / 500} fill="#0d1117" stroke="#00ff64" strokeWidth={(config.width || 1920) / 700} />
                                                     ))}
                                                     {measurePoints.length === 2 && (
                                                         <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measurePoints[1].x} y2={measurePoints[1].y} stroke="#00ff64" strokeWidth={(config.width || 1920) / 600} strokeDasharray="10,8" />
                                                     )}
                                                     {measurePoints.length === 1 && measureHover && (
                                                         <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measureHover.x} y2={measureHover.y} stroke="#00ff64" strokeWidth={(config.width || 1920) / 600} strokeDasharray="10,8" opacity={0.7} />
+                                                    )}
+                                                    {segmentContour && (
+                                                        <polygon
+                                                            points={segmentContour.map(p => `${p.x},${p.y}`).join(' ')}
+                                                            fill="rgba(167, 139, 250, 0.25)"
+                                                            stroke="#a78bfa"
+                                                            strokeWidth={(config.width || 1920) / 800}
+                                                        />
+                                                    )}
+
+                                                    {/* Drawing segment shapes */}
+                                                    {segmentDrawPoints.map((p, i) => (
+                                                        <circle key={`s-${i}`} cx={p.x} cy={p.y} r={(config.width || 1920) / 600} fill="#a78bfa" />
+                                                    ))}
+                                                    {segmentActive && segmentTool === 'rect' && segmentDrawPoints.length === 1 && measureHover && (
+                                                        <rect x={Math.min(segmentDrawPoints[0].x, measureHover.x)} y={Math.min(segmentDrawPoints[0].y, measureHover.y)} width={Math.abs(measureHover.x - segmentDrawPoints[0].x)} height={Math.abs(measureHover.y - segmentDrawPoints[0].y)} fill="rgba(167, 139, 250, 0.1)" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
+                                                    )}
+                                                    {segmentActive && segmentTool === 'circle' && segmentDrawPoints.length === 1 && measureHover && (() => {
+                                                        const r = Math.hypot(measureHover.x - segmentDrawPoints[0].x, measureHover.y - segmentDrawPoints[0].y);
+                                                        return <circle cx={segmentDrawPoints[0].x} cy={segmentDrawPoints[0].y} r={r} fill="rgba(167, 139, 250, 0.1)" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
+                                                    })()}
+                                                    {segmentActive && segmentTool === 'polygon' && segmentDrawPoints.length > 0 && measureHover && (
+                                                        <polyline points={[...segmentDrawPoints, measureHover].map(p => `${p.x},${p.y}`).join(' ')} fill="none" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
                                                     )}
                                                 </svg>
                                             )}
@@ -1757,7 +1829,7 @@ ${tlConfig.enablePersistentIp ? `
                     </div>
                 )}
 
-                {/* â•”â•â• TAB: CALIBRACIÃ“N â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•— */}
+                {/* â•”â•â• TAB: CALIBRACIÃ“N â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•— */}
                 {activeTab === 'calibration' && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 12, flex: 1, minHeight: 0 }}>
 
@@ -1789,10 +1861,11 @@ ${tlConfig.enablePersistentIp ? `
 
                                 {/* ── PANEL DE MEDICIÓN ── */}
                                 <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, background: measureActive ? '#1f6feb15' : '#0d1117', border: `1px solid ${measureActive ? '#1f6feb50' : '#30363d'}`, padding: '6px 12px', borderRadius: 6 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                         <button className={`basler-tab-mini ${measureActive ? 'active' : ''}`} style={measureActive ? { borderColor: '#1f6feb', color: '#1f6feb' } : {}} onClick={() => { setMeasureActive(!measureActive); setMeasurePoints([]); setMeasureHover(null); }}>
                                             📏 {measureActive ? 'Medición Activa (Click 2 ptos)' : 'Medir (OpenCV / Pixel)'}
                                         </button>
+
                                         {measurePoints.length === 2 && (() => {
                                             const distPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
                                             const realDist = (distPx * measureRatioMmPx).toFixed(2);
@@ -1806,53 +1879,69 @@ ${tlConfig.enablePersistentIp ? `
                                     </div>
                                     {measureActive && measurePoints.length === 2 && (
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.75rem', marginTop: 4 }}>
-                                            <span style={{ color: '#8b949e' }}>Calibrar medida real (mm):</span>
+                                            <span style={{ color: '#8b949e' }}>Ref. Medida (mm):</span>
                                             <input type="number" step="1" className="basler-input" style={{ width: 70, padding: '2px 4px', fontSize: '0.75rem' }} value={inputMeasureMm} onChange={e => setInputMeasureMm(e.target.value)} />
+
                                             <button className="basler-tab-mini" style={{ padding: '2px 6px' }} onClick={() => {
                                                 const distPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
                                                 const ref = parseFloat(inputMeasureMm);
                                                 if (distPx > 0 && ref > 0) setMeasureRatioMmPx(ref / distPx);
-                                            }}>Ajustar Escala</button>
+                                            }}>Ajustar Escala Manual</button>
                                         </div>
                                     )}
                                 </div>
 
-
-                                {calActive && (
-                                    <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, background: '#00ff6415', border: '1px solid #00ff6450', padding: '6px 12px', borderRadius: 6, fontSize: '0.78rem', color: '#00ff64' }}>
-                                        <span>✨ Filtro Calibración Activo (RMS {calActiveRms?.toFixed(4)})</span>
-                                        <button className="basler-tab-mini" style={{ marginLeft: 'auto', borderColor: '#ff444450', color: '#ff4444' }} onClick={handleCalRemove}>🗑 Quitar</button>
-                                    </div>
-                                )}
-
-                                {/* ── PANEL DE MEDICIÓN ── */}
-                                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, background: measureActive ? '#1f6feb15' : '#0d1117', border: `1px solid ${measureActive ? '#1f6feb50' : '#30363d'}`, padding: '6px 12px', borderRadius: 6 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                        <button className={`basler-tab-mini ${measureActive ? 'active' : ''}`} style={measureActive ? { borderColor: '#1f6feb', color: '#1f6feb' } : {}} onClick={() => { setMeasureActive(!measureActive); setMeasurePoints([]); setMeasureHover(null); }}>
-                                            📏 {measureActive ? 'Medición Activa (Click 2 ptos)' : 'Medir (OpenCV / Pixel)'}
+                                {/* ── PANEL DE SEGMENTACIÓN ── */}
+                                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, background: segmentActive ? '#a78bfa15' : '#0d1117', border: `1px solid ${segmentActive ? '#a78bfa50' : '#30363d'}`, padding: '6px 12px', borderRadius: 6 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                        <button className={`basler-tab-mini ${segmentActive ? 'active' : ''}`} style={segmentActive ? { borderColor: '#a78bfa', color: '#a78bfa' } : {}} onClick={() => { setSegmentActive(!segmentActive); setMeasureActive(false); setSegmentContour(null); setSegmentResult(null); setSegmentDrawPoints([]); }}>
+                                            🧩 Segmentar Objeto
                                         </button>
-                                        {measurePoints.length === 2 && (() => {
-                                            const distPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
-                                            const realDist = (distPx * measureRatioMmPx).toFixed(2);
-                                            return (
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginLeft: 'auto', fontSize: '0.8rem' }}>
-                                                    <span style={{ color: '#8b949e' }}>{distPx.toFixed(1)} px</span>
-                                                    <strong style={{ color: '#00ff64', fontSize: '0.9rem' }}>⇿ {realDist} mm</strong>
-                                                </div>
-                                            );
-                                        })()}
+
+                                        {segmentActive && (
+                                            <>
+                                                <select className="basler-input" style={{ width: 140, padding: '2px 4px', fontSize: '0.75rem', borderColor: '#a78bfa50' }} value={segmentTool} onChange={(e) => { setSegmentTool(e.target.value as any); setSegmentDrawPoints([]); setSegmentContour(null); }}>
+                                                    <option value="point">📍 Punto Único</option>
+                                                    <option value="rect">🔲 Rectángulo</option>
+                                                    <option value="circle">⭕ Círculo (Centro-Borde)</option>
+                                                    <option value="polygon">✏️ Polígono</option>
+                                                </select>
+
+                                                {segmentTool === 'point' && (
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.75rem', marginLeft: 'auto' }}>
+                                                        <span style={{ color: '#8b949e' }} title="Tolerancia del detector (1-255). Valores más altos agrupan más colores.">Tolerancia:</span>
+                                                        <input type="number" min="1" max="255" step="1" className="basler-input" style={{ width: 60, padding: '2px 4px', fontSize: '0.75rem' }} value={segmentTolerance} onChange={e => setSegmentTolerance(e.target.value === '' ? '' : (parseInt(e.target.value) || 0))} />
+                                                    </div>
+                                                )}
+
+                                                {segmentTool === 'polygon' && segmentDrawPoints.length >= 3 && (
+                                                    <button className="basler-tab-mini" style={{ marginLeft: 'auto', padding: '2px 8px', fontSize: '0.75rem', borderColor: '#00ff64', color: '#00ff64' }} onClick={() => {
+                                                        runSegmentation('polygon', segmentDrawPoints);
+                                                        setSegmentDrawPoints([]);
+                                                    }}>Aplicar Polígono</button>
+                                                )}
+
+                                                {segmentDrawPoints.length > 0 && segmentTool !== 'polygon' && (
+                                                    <span style={{ fontSize: '0.75rem', color: '#8b949e', fontStyle: 'italic', marginLeft: 'auto' }}>
+                                                        {segmentDrawPoints.length === 1 ? 'Haz clic para cerrar la forma' : ''}
+                                                    </span>
+                                                )}
+                                            </>
+                                        )}
                                     </div>
-                                    {measureActive && measurePoints.length === 2 && (
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.75rem', marginTop: 4 }}>
-                                            <span style={{ color: '#8b949e' }}>Calibrar medida real (mm):</span>
-                                            <input type="number" step="1" className="basler-input" style={{ width: 70, padding: '2px 4px', fontSize: '0.75rem' }} value={inputMeasureMm} onChange={e => setInputMeasureMm(e.target.value)} />
-                                            <button className="basler-tab-mini" style={{ padding: '2px 6px' }} onClick={() => {
-                                                const distPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
-                                                const ref = parseFloat(inputMeasureMm);
-                                                if (distPx > 0 && ref > 0) setMeasureRatioMmPx(ref / distPx);
-                                            }}>Ajustar Escala</button>
-                                        </div>
-                                    )}
+
+                                    {segmentResult && (() => {
+                                        const areaMm2 = segmentResult.area_px * (measureRatioMmPx * measureRatioMmPx);
+                                        return (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4, fontSize: '0.8rem', background: '#a78bfa20', padding: '4px 8px', borderRadius: 4 }}>
+                                                <span style={{ color: '#c4b5fd' }}>Área: {segmentResult.area_px.toLocaleString()} px²</span>
+                                                {measureRatioMmPx !== 1 && (
+                                                    <strong style={{ color: '#a78bfa', fontSize: '0.85rem' }}>≈ {areaMm2.toFixed(1)} mm²</strong>
+                                                )}
+                                                <button className="basler-tab-mini" style={{ marginLeft: 'auto', padding: '2px 6px', fontSize: '0.7rem', borderColor: '#a78bfa50', color: '#c4b5fd' }} onClick={() => { setSegmentContour(null); setSegmentResult(null); }}>Limpiar</button>
+                                            </div>
+                                        );
+                                    })()}
                                 </div>
 
 
@@ -1866,19 +1955,41 @@ ${tlConfig.enablePersistentIp ? `
                                                 alt="Calibration MJPEG Stream" onClick={handleStreamClick} onMouseMove={handleStreamMove} onMouseLeave={handleStreamLeave}
                                                 className="stream-zoom-img"
                                                 draggable={false}
-                                                style={{ transform: 'none', objectFit: 'contain', cursor: measureActive ? 'crosshair' : 'default', pointerEvents: measureActive ? 'auto' : 'none' }}
+                                                style={{ transform: 'none', objectFit: 'contain', cursor: measureActive ? 'crosshair' : (segmentActive ? 'cell' : 'default'), pointerEvents: (measureActive || segmentActive) ? 'auto' : 'none' }}
                                                 onError={() => log('error', 'Error cargando stream (calibraciÃ³n)')}
                                             />
-                                            {measureActive && (
+                                            {(measureActive || segmentContour || segmentDrawPoints.length > 0) && (
                                                 <svg viewBox={`0 0 ${config.width || 1920} ${config.height || 1080}`} preserveAspectRatio="xMidYMid meet" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
                                                     {measurePoints.map((p, i) => (
-                                                        <circle key={i} cx={p.x} cy={p.y} r={(config.width || 1920) / 500} fill="#0d1117" stroke="#00ff64" strokeWidth={(config.width || 1920) / 700} />
+                                                        <circle key={`m2-${i}`} cx={p.x} cy={p.y} r={(config.width || 1920) / 500} fill="#0d1117" stroke="#00ff64" strokeWidth={(config.width || 1920) / 700} />
                                                     ))}
                                                     {measurePoints.length === 2 && (
                                                         <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measurePoints[1].x} y2={measurePoints[1].y} stroke="#00ff64" strokeWidth={(config.width || 1920) / 600} strokeDasharray="10,8" />
                                                     )}
                                                     {measurePoints.length === 1 && measureHover && (
                                                         <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measureHover.x} y2={measureHover.y} stroke="#00ff64" strokeWidth={(config.width || 1920) / 600} strokeDasharray="10,8" opacity={0.7} />
+                                                    )}
+                                                    {segmentContour && (
+                                                        <polygon
+                                                            points={segmentContour.map(p => `${p.x},${p.y}`).join(' ')}
+                                                            fill="rgba(167, 139, 250, 0.25)"
+                                                            stroke="#a78bfa"
+                                                            strokeWidth={(config.width || 1920) / 800}
+                                                        />
+                                                    )}
+                                                    {/* Drawing segment shapes in second stream */}
+                                                    {segmentDrawPoints.map((p, i) => (
+                                                        <circle key={`s2-${i}`} cx={p.x} cy={p.y} r={(config.width || 1920) / 600} fill="#a78bfa" />
+                                                    ))}
+                                                    {segmentActive && segmentTool === 'rect' && segmentDrawPoints.length === 1 && measureHover && (
+                                                        <rect x={Math.min(segmentDrawPoints[0].x, measureHover.x)} y={Math.min(segmentDrawPoints[0].y, measureHover.y)} width={Math.abs(measureHover.x - segmentDrawPoints[0].x)} height={Math.abs(measureHover.y - segmentDrawPoints[0].y)} fill="rgba(167, 139, 250, 0.1)" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
+                                                    )}
+                                                    {segmentActive && segmentTool === 'circle' && segmentDrawPoints.length === 1 && measureHover && (() => {
+                                                        const r = Math.hypot(measureHover.x - segmentDrawPoints[0].x, measureHover.y - segmentDrawPoints[0].y);
+                                                        return <circle cx={segmentDrawPoints[0].x} cy={segmentDrawPoints[0].y} r={r} fill="rgba(167, 139, 250, 0.1)" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
+                                                    })()}
+                                                    {segmentActive && segmentTool === 'polygon' && segmentDrawPoints.length > 0 && measureHover && (
+                                                        <polyline points={[...segmentDrawPoints, measureHover].map(p => `${p.x},${p.y}`).join(' ')} fill="none" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
                                                     )}
                                                 </svg>
                                             )}

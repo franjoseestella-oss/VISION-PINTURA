@@ -798,6 +798,13 @@ class CameraHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        import base64
+        try:
+            import numpy as np
+            import cv2
+        except ImportError:
+            pass
+            
         parsed = urlparse(self.path)
         path = parsed.path
         length = int(self.headers.get("Content-Length", 0))
@@ -832,9 +839,52 @@ class CameraHandler(BaseHTTPRequestHandler):
             self._json_response({"ok": True})
 
         # ── /api/connect
-        if path == "/api/connect":
+        elif path == "/api/connect":
             result = connect_camera(params)
             self._json_response(result)
+
+        # ── /api/calibration/auto_ratio
+        elif path == "/api/calibration/auto_ratio":
+            with frame_lock:
+                frame = current_frame.copy() if current_frame is not None else None
+            if frame is None:
+                self._json_response({"ok": False, "error": "No hay frame en este momento."})
+                return
+            
+            try:
+                aruco_mm = float(params.get("aruco_mm", 50.0))
+                # Intentamos detectar con el diccionario DICT_4X4_50 que es muy común para calibración
+                aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+                aruco_params = cv2.aruco.DetectorParameters()
+                detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
+                
+                # Convertir a escala de grises para mejor detección
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                corners, ids, rejected = detector.detectMarkers(gray)
+                
+                if ids is not None and len(ids) > 0:
+                    # Tomar el primer marcador detectado
+                    c = corners[0][0] # 4 esquinas del marcador -> shape (4, 2)
+                    
+                    # Distancias entre vértices (lados)
+                    side_1 = np.linalg.norm(c[0] - c[1])
+                    side_2 = np.linalg.norm(c[1] - c[2])
+                    side_3 = np.linalg.norm(c[2] - c[3])
+                    side_4 = np.linalg.norm(c[3] - c[0])
+                    
+                    avg_side_px = float((side_1 + side_2 + side_3 + side_4) / 4.0)
+                    ratio = aruco_mm / avg_side_px
+                    
+                    self._json_response({
+                        "ok": True, 
+                        "ratio": ratio, 
+                        "avg_px": avg_side_px, 
+                        "aruco_id": int(ids[0][0])
+                    })
+                else:
+                    self._json_response({"ok": False, "error": "No se ha detectado ningún marcador ArUco (DICT_4X4_50) en la imagen."})
+            except Exception as e:
+                self._json_response({"ok": False, "error": str(e)})
 
         # ── /api/record/start
         elif path == "/api/record/start":
@@ -853,8 +903,6 @@ class CameraHandler(BaseHTTPRequestHandler):
 
         # ── /api/calibration/compute — calibra cámara con las imágenes
         elif path == "/api/calibration/compute":
-            import os, glob
-
             save_dir  = params.get("dir", "")
             cols      = int(params.get("cols", 9))
             rows      = int(params.get("rows", 6))
@@ -984,6 +1032,220 @@ class CameraHandler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self._json_response({"ok": False, "error": f"cv2.calibrateCamera falló: {e}"})
+
+        # ── /api/segment
+        elif path == "/api/segment":
+            with frame_lock:
+                frame = current_frame.copy() if current_frame is not None else None
+            
+            if frame is None:
+                self._json_response({"ok": False, "error": "No hay frame actual para segmentar."})
+                return
+
+            try:
+                method = params.get("method", "point")
+                pts = params.get("points", [])
+                
+                h, w = frame.shape[:2]
+                
+                if method == "point":
+                    # Single point click -> FloodFill
+                    x = int(pts[0].get("x", 0)) if len(pts) > 0 else 0
+                    y = int(pts[0].get("y", 0)) if len(pts) > 0 else 0
+                    tolerance = int(params.get("tolerance", 30))
+                    
+                    if not (0 <= x < w and 0 <= y < h):
+                        self._json_response({"ok": False, "error": "Coordenadas fuera de imagen."})
+                        return
+
+                    import numpy as np
+                    mask = np.zeros((h + 2, w + 2), np.uint8)
+                    flags = 4 | (255 << 8) | cv2.FLOODFILL_MASK_ONLY | cv2.FLOODFILL_FIXED_RANGE
+                    diff = (tolerance, tolerance, tolerance)
+
+                    cv2.floodFill(frame, mask, (x, y), (255, 255, 255), diff, diff, flags)
+                    mask_res = mask[1:-1, 1:-1]
+                    
+                else: # Shape-based segmentation -> GrabCut 
+                    if len(pts) < 2 and method != "polygon":
+                        self._json_response({"ok": False, "error": "Puntos insuficientes."})
+                        return
+                    if method == "polygon" and len(pts) < 3:
+                        self._json_response({"ok": False, "error": "Escasos puntos para polígono."})
+                        return
+                        
+                    import numpy as np
+                    mask = np.zeros((h, w), np.uint8)
+                    mask[:] = cv2.GC_BGD # Fondo general
+                    
+                    rect_bounds = None
+                    
+                    if method == "rect":
+                        x1, y1 = int(pts[0]['x']), int(pts[0]['y'])
+                        x2, y2 = int(pts[1]['x']), int(pts[1]['y'])
+                        cv2.rectangle(mask, (min(x1,x2), min(y1,y2)), (max(x1,x2), max(y1,y2)), cv2.GC_PR_FGD, -1)
+                        rect_bounds = (min(x1,x2), min(y1,y2), abs(x2-x1), abs(y2-y1))
+                    elif method == "circle":
+                        cx, cy = int(pts[0]['x']), int(pts[0]['y'])
+                        ox, oy = int(pts[1]['x']), int(pts[1]['y'])
+                        r = int(np.hypot(ox - cx, oy - cy))
+                        cv2.circle(mask, (cx, cy), r, cv2.GC_PR_FGD, -1)
+                        rect_bounds = (max(0, cx-r), max(0, cy-r), r*2, r*2)
+                    elif method == "polygon":
+                        poly_pts = np.array([[int(p['x']), int(p['y'])] for p in pts], np.int32)
+                        cv2.fillPoly(mask, [poly_pts], cv2.GC_PR_FGD)
+                        rect_bounds = cv2.boundingRect(poly_pts)
+                         
+                    # Evitar errores si rects se salen:
+                    rx, ry, rw, rh = rect_bounds
+                    if rw <= 0 or rh <= 0:
+                        self._json_response({"ok": False, "error": "Dimensiones del área son inválidas."})
+                        return
+                        
+                    bgdModel = np.zeros((1, 65), np.float64)
+                    fgdModel = np.zeros((1, 65), np.float64)
+                    
+                    try:
+                        cv2.grabCut(frame, mask, rect_bounds, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_MASK)
+                    except Exception as e:
+                        self._json_response({"ok": False, "error": f"GrabCut error: {str(e)}"})
+                        return
+                        
+                    mask_res = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8') * 255
+
+                # Encontrar contornos de cualquiera de los dos metodos
+                contours, _ = cv2.findContours(mask_res, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                if not contours:
+                    self._json_response({"ok": False, "error": "No se distinguen objetos diferenciados del fondo."})
+                    return
+                
+                # Toma el contorno más voluminoso generado
+                best_c = max(contours, key=cv2.contourArea)
+                
+                # Suavizar / Aproximar contorno para reducir el número de vértices (JSON más rápido)
+                epsilon = 0.002 * cv2.arcLength(best_c, True)
+                approx = cv2.approxPolyDP(best_c, epsilon, True)
+                
+                area = float(cv2.contourArea(approx))
+                
+                # Calcular el punto medio (Centroide) de la pieza
+                M = cv2.moments(approx)
+                cx = int(M['m10']/M['m00']) if M['m00'] != 0 else x if method == "point" else int(pts[0]['x'])
+                cy = int(M['m01']/M['m00']) if M['m00'] != 0 else y if method == "point" else int(pts[0]['y'])
+                
+                contour_pts = [{"x": int(pt[0][0]), "y": int(pt[0][1])} for pt in approx]
+
+                self._json_response({
+                    "ok": True,
+                    "area_px": area,
+                    "cx": cx,
+                    "cy": cy,
+                    "contour": contour_pts
+                })
+
+            except Exception as e:
+                self._json_response({"ok": False, "error": f"Fallo en segmentación: {str(e)}"})
+
+        # ── /api/measure/roboflow
+        elif path == "/api/measure/roboflow":
+            from inference_sdk import InferenceHTTPClient
+            import traceback
+
+            try:
+                b64_str = params.get("image", "")
+                if "," in b64_str:
+                    b64_str = b64_str.split(",")[1]
+
+                img_data = base64.b64decode(b64_str)
+                nparr = np.frombuffer(img_data, np.uint8)
+                img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                img_h, img_w = img_cv.shape[:2]
+
+                temp_path = "temp_roboflow.jpg"
+                cv2.imwrite(temp_path, img_cv)
+
+                client = InferenceHTTPClient(
+                    api_url="https://serverless.roboflow.com",
+                    api_key="K6YHioHqtuwbsNmR2n7O"
+                )
+
+                result_raw = client.run_workflow(
+                    workspace_name="welding-hqci3",
+                    workflow_id="detect-count-and-visualize-2",
+                    images={"image": temp_path},
+                    use_cache=True
+                )
+
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+                # Serializar todo de forma segura
+                def to_json(obj):
+                    if obj is None: return None
+                    if isinstance(obj, (str, int, float, bool)): return obj
+                    if isinstance(obj, dict): return {k: to_json(v) for k, v in obj.items()}
+                    if isinstance(obj, list): return [to_json(v) for v in obj]
+                    if hasattr(obj, 'tolist'): return obj.tolist()  # numpy
+                    if hasattr(obj, '__dict__'): return to_json(obj.__dict__)
+                    try:
+                        import json; json.dumps(obj); return obj
+                    except: return str(obj)
+
+                result = to_json(result_raw)
+
+                # result es lista: [{count_objects, output_image, predictions:{image, predictions:[...]}}]
+                r0 = result[0] if (isinstance(result, list) and len(result) > 0) else {}
+
+                # Extraer output_image
+                output_image = r0.get("output_image")  # string base64 JPEG
+
+                # Extraer predicciones
+                preds_raw = r0.get("predictions", {})
+                if isinstance(preds_raw, dict):
+                    predictions = preds_raw.get("predictions", [])
+                elif isinstance(preds_raw, list):
+                    predictions = preds_raw
+                else:
+                    predictions = []
+
+                print(f"[Roboflow] {len(predictions)} predicciones | output_image: {'SI' if output_image else 'NO'}")
+
+                self._json_response({
+                    "ok": True,
+                    "output_image": output_image,
+                    "predictions": predictions,
+                    "image_width": img_w,
+                    "image_height": img_h
+                })
+
+            except Exception as e:
+                print(traceback.format_exc())
+                self._json_response({"ok": False, "error": str(e)})
+
+        # ── /api/measure/canny
+        elif path == "/api/measure/canny":
+            try:
+                # Recibe un resultado de segmentación y calcula bordes de Canny.
+                # Como el Canny puede ser pesado e igual requiere la imagen, envíamos la base64 de vuelta.
+                b64_str = params.get("image", "")
+                if "," in b64_str:
+                    b64_str = b64_str.split(",")[1]
+                
+                img_data = base64.b64decode(b64_str)
+                nparr = np.frombuffer(img_data, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+                
+                edges = cv2.Canny(img, 50, 150)
+                
+                # Devolver los puntos de borde es costoso para un JSON.
+                # Mejor devolver la imagen base64 de Canny:
+                ret, buf = cv2.imencode('.png', edges)
+                edges_b64 = "data:image/png;base64," + base64.b64encode(buf).decode('utf-8')
+                
+                self._json_response({"ok": True, "edges_image": edges_b64})
+            except Exception as e:
+                self._json_response({"ok": False, "error": str(e)})
 
         # ── /api/disconnect
         elif path == "/api/disconnect":

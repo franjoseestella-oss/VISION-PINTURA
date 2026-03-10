@@ -1,0 +1,3 @@
+Keys: dict_keys(['count_objects', 'output_image', 'predictions'])
+Type of predictions: <class 'dict'>
+Content predictions: {'image': {'width': None, 'height': None}, 'predictions': []}

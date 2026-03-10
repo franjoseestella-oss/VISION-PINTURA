@@ -7,6 +7,7 @@ import { getChatResponse } from './services/gemini';
 import PlcConfig from './PlcConfig';
 import BaslerCamera from './BaslerCamera';
 import { useTranslation } from './i18n';
+import ImageMeasurement from './ImageMeasurement';
 
 interface Detection {
   id: number;
@@ -33,7 +34,7 @@ interface ChatMessage {
 
 function App() {
   const { t, language, setLanguage } = useTranslation();
-  const [activeTab, setActiveTab] = useState<'live' | 'mapping' | 'chat' | 'plc' | 'camera'>('live');
+  const [activeTab, setActiveTab] = useState<'live' | 'mapping' | 'chat' | 'plc' | 'camera' | 'medicion'>('live');
   const [fps, setFps] = useState(0);
   const [confidenceAvg, setConfidenceAvg] = useState(94);
   const [modelActive, setModelActive] = useState(true);
@@ -170,6 +171,7 @@ function App() {
           <button className={`nav-btn ${activeTab === 'mapping' ? 'active' : ''}`} onClick={() => setActiveTab('mapping')}>{t('mapping')}</button>
           <button className={`nav-btn ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>{t('chat')}</button>
           <button className={`nav-btn ${activeTab === 'plc' ? 'active' : ''}`} onClick={() => setActiveTab('plc')}>{t('plc')}</button>
+          <button className={`nav-btn ${activeTab === 'medicion' ? 'active' : ''}`} onClick={() => setActiveTab('medicion')}>Medición</button>
         </div>
         <div className="nav-right" style={{ display: 'flex', alignItems: 'center', marginLeft: '16px', gap: '16px' }}>
           <img
@@ -297,6 +299,8 @@ function App() {
           <BaslerCamera />
         ) : activeTab === 'plc' ? (
           <PlcConfig />
+        ) : activeTab === 'medicion' ? (
+          <ImageMeasurement />
         ) : activeTab === 'mapping' ? (
           <div className="mapping-container">
             <div className="mapping-header">
