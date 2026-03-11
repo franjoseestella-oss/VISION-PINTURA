@@ -1247,10 +1247,194 @@ class CameraHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json_response({"ok": False, "error": str(e)})
 
+        # ── /api/video/convert — convert non-browser formats (AVI, MOV, MKV…) to MP4
+        elif path == "/api/video/convert":
+            import tempfile, traceback
+            try:
+                b64_str = params.get("video", "")
+                if "," in b64_str:
+                    b64_str = b64_str.split(",", 1)[1]
+
+                video_data = base64.b64decode(b64_str)
+                if len(video_data) < 100:
+                    raise ValueError("Archivo de vídeo demasiado pequeño o vacío")
+
+                # Write incoming video to a temp file
+                with tempfile.NamedTemporaryFile(suffix=".input", delete=False) as tmp_in:
+                    tmp_in.write(video_data)
+                    input_path = tmp_in.name
+
+                output_path = input_path + ".mp4"
+
+                cap = cv2.VideoCapture(input_path)
+                if not cap.isOpened():
+                    os.remove(input_path)
+                    raise RuntimeError("OpenCV no pudo abrir el vídeo. Formato no soportado.")
+
+                fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+                # Try H.264 first, fall back to mp4v
+                fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+                if not writer.isOpened():
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+
+                if not writer.isOpened():
+                    cap.release()
+                    os.remove(input_path)
+                    raise RuntimeError("No se pudo crear el writer MP4 (instala ffmpeg para soporte completo).")
+
+                written = 0
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    writer.write(frame)
+                    written += 1
+
+                cap.release()
+                writer.release()
+
+                if written == 0:
+                    os.remove(input_path)
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                    raise RuntimeError("El vídeo no contiene frames legibles.")
+
+                # Read converted MP4 and return as base64
+                with open(output_path, "rb") as f:
+                    mp4_bytes = f.read()
+
+                mp4_b64 = base64.b64encode(mp4_bytes).decode("ascii")
+
+                # Cleanup temp files
+                os.remove(input_path)
+                os.remove(output_path)
+
+                print(f"[Video Convert] {total_frames} frames → {written} written, {len(mp4_bytes)//1024}KB MP4")
+                self._json_response({
+                    "ok": True,
+                    "mp4_base64": mp4_b64,
+                    "frames": written,
+                    "fps": fps,
+                    "width": w,
+                    "height": h,
+                })
+
+            except Exception as e:
+                print(f"[Video Convert ERROR] {e}")
+                print(traceback.format_exc())
+                self._json_response({"ok": False, "error": str(e)})
+
         # ── /api/disconnect
         elif path == "/api/disconnect":
             disconnect_camera()
             self._json_response({"ok": True})
+
+        # ── /api/roboflow-classes — Get class names from Roboflow project "cargar_piezas"
+        elif path == "/api/roboflow-classes":
+            try:
+                import urllib.request
+                api_key = "K6YHioHqtuwbsNmR2n7O"
+                workspace = "welding-hqci3"
+                project = "CARGAR_PIEZAS"
+                # Roboflow REST API: get project details with classes
+                req_url = f"https://api.roboflow.com/{workspace}/{project}?api_key={api_key}"
+                print(f"[ROBOFLOW] Fetching classes from: {req_url}")
+                try:
+                    req = urllib.request.Request(req_url)
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        data = json.loads(resp.read().decode())
+                        classes = []
+                        # classes field in project response
+                        if "classes" in data:
+                            if isinstance(data["classes"], dict):
+                                classes = sorted(data["classes"].keys())
+                            elif isinstance(data["classes"], list):
+                                classes = sorted(data["classes"])
+                        # Alternative: versions[].classes
+                        if not classes and "versions" in data:
+                            for v in data["versions"]:
+                                if "classes" in v:
+                                    if isinstance(v["classes"], dict):
+                                        classes = sorted(v["classes"].keys())
+                                    elif isinstance(v["classes"], list):
+                                        classes = sorted(v["classes"])
+                                    if classes:
+                                        break
+                        print(f"[ROBOFLOW] Classes from project '{project}': {classes}")
+                        if classes:
+                            self._json_response({"ok": True, "classes": classes, "project": project})
+                            return
+                except Exception as api_err:
+                    print(f"[ROBOFLOW] API error: {api_err}")
+
+                # Fallback: hardcoded known classes from CARGAR_PIEZAS
+                known_classes = [
+                    "BARRA CARGA",
+                    "BASTIDOR COLGADO",
+                    "CANCHO CURVO BASTIDOR",
+                    "CANDENAS BASTIDOR",
+                    "GANCHO BASTIDOR",
+                    "M2_LARGO_STD",
+                    "MASTIL COLGADO",
+                    "NO HAY PIEZA CARGADA",
+                    "OTR MASTIL 1 CUERPO M2_MG",
+                    "OTR-INR MASTIL 2 CUERPO M2_MG",
+                    "PALLET",
+                    "XL COMPACT",
+                ]
+                print(f"[ROBOFLOW] Using fallback classes for '{project}'")
+                self._json_response({"ok": True, "classes": known_classes, "source": "fallback", "project": project})
+
+            except Exception as e:
+                print(f"[ROBOFLOW CLASSES ERROR] {e}")
+                self._json_response({"ok": False, "error": str(e)})
+
+        # ── /api/save-calibration-image
+        elif path == "/api/save-calibration-image":
+            print(f"[CAL SAVE] Endpoint hit, body length: {len(body)}")
+            try:
+                import base64
+                from datetime import datetime
+                cal_body = json.loads(body)
+                img_data = cal_body.get("image", "")  # base64 data URL
+                save_dir = cal_body.get("directory", "")
+                mm_per_px = cal_body.get("mmPerPx", 0)
+                print(f"[CAL SAVE] img_data length: {len(img_data)}, save_dir: {save_dir}, mmPerPx: {mm_per_px}")
+
+                if not img_data or not save_dir:
+                    self._json_response({"ok": False, "error": "Missing image or directory"})
+                    return
+
+                # Strip data URL prefix
+                if "," in img_data:
+                    img_data = img_data.split(",", 1)[1]
+
+                img_bytes = base64.b64decode(img_data)
+                os.makedirs(save_dir, exist_ok=True)
+
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                custom_fn = cal_body.get("filename", "")
+                if custom_fn:
+                    filename = custom_fn
+                else:
+                    filename = f"calibracion_{ts}_{mm_per_px:.4f}mmppx.png"
+                filepath = os.path.join(save_dir, filename)
+
+                with open(filepath, "wb") as f:
+                    f.write(img_bytes)
+
+                print(f"[CAL] Imagen guardada: {filepath}")
+                self._json_response({"ok": True, "path": filepath, "filename": filename})
+
+            except Exception as e:
+                print(f"[CAL ERROR] {e}")
+                self._json_response({"ok": False, "error": str(e)})
 
         else:
             self.send_response(404)

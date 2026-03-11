@@ -1,5 +1,6 @@
 ﻿import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from './i18n';
+import ImageMeasurement from './ImageMeasurement';
 
 // ─── Tipos reales basados en BaslerCameraCameraParams.h (acA1920-48gm) ────────
 
@@ -130,7 +131,7 @@ export default function BaslerCamera() {
     const [tlConfig, setTLConfig] = useState<TLConfig>(DEFAULT_TL_CONFIG);
     const [scanProgress, setScanProgress] = useState(0);
     const [errorMsg, setErrorMsg] = useState('');
-    const [activeTab, setActiveTab] = useState<'connection' | 'image' | 'acquisition' | 'trigger' | 'gige' | 'transport' | 'preview' | 'calibration'>('connection');
+    const [activeTab, setActiveTab] = useState<'connection' | 'image' | 'acquisition' | 'trigger' | 'gige' | 'transport' | 'preview' | 'calibration' | 'test'>('connection');
     const [logs, setLogs] = useState<{ time: string; level: 'info' | 'warn' | 'error' | 'success'; msg: string }[]>([]);
     // Backend Python
     const [backendOk, setBackendOk] = useState<boolean | null>(null); // null=checking
@@ -163,7 +164,7 @@ export default function BaslerCamera() {
     const panStart = useRef({ mx: 0, my: 0, px: 0, py: 0 });
     const streamWrapRef = useRef<HTMLDivElement>(null);
     const handleStreamClick = async (e: React.MouseEvent<HTMLImageElement>) => {
-        if (!measureActive && !segmentActive) return;
+        if (!measureActive) return;
         const img = e.currentTarget;
         const rect = img.getBoundingClientRect();
         const nw = img.naturalWidth || config.width;
@@ -185,50 +186,13 @@ export default function BaslerCamera() {
                     if (next.length > 2) return [{ x: ox, y: oy }];
                     return next;
                 });
-            } else if (segmentActive) {
-                if (segmentTool === 'point') {
-                    runSegmentation('point', [{ x: ox, y: oy }]);
-                } else if (segmentTool === 'rect' || segmentTool === 'circle') {
-                    setSegmentDrawPoints(prev => {
-                        const next = [...prev, { x: ox, y: oy }];
-                        if (next.length === 2) {
-                            runSegmentation(segmentTool, next);
-                            return [];
-                        }
-                        if (next.length > 2) return [{ x: ox, y: oy }];
-                        return next;
-                    });
-                } else if (segmentTool === 'polygon') {
-                    setSegmentDrawPoints(prev => [...prev, { x: ox, y: oy }]);
-                }
             }
         }
     };
 
-    const runSegmentation = async (method: string, pts: { x: number, y: number }[]) => {
-        setSegmentContour(null);
-        setSegmentResult(null);
-        try {
-            const r = await fetch(`${BACKEND}/api/segment`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ method, points: pts, tolerance: segmentTolerance || 30 })
-            });
-            const data = await r.json();
-            if (data.ok && data.contour) {
-                setSegmentContour(data.contour);
-                setSegmentResult({ area_px: data.area_px, cx: data.cx, cy: data.cy });
-                log('success', `🧩 Pieza segmentada. Área: ${Math.round(data.area_px).toLocaleString()} px²`);
-            } else if (data.error) {
-                log('warn', `Segmentación fallida: ${data.error}`);
-            }
-        } catch (err) {
-            log('error', 'Error conectando al servidor para segmentación.');
-        }
-    };
 
     const handleStreamMove = (e: React.MouseEvent<HTMLImageElement>) => {
-        if (!measureActive && !(segmentActive && (segmentTool === 'rect' || segmentTool === 'circle' || segmentTool === 'polygon'))) return;
+        if (!measureActive) return;
         const img = e.currentTarget;
         const rect = img.getBoundingClientRect();
         const nw = img.naturalWidth || config.width;
@@ -276,22 +240,931 @@ export default function BaslerCamera() {
     const [measureActive, setMeasureActive] = useState(false);
     const [measurePoints, setMeasurePoints] = useState<{ x: number, y: number }[]>([]);
     const [measureHover, setMeasureHover] = useState<{ x: number, y: number } | null>(null);
-    const [measureRatioMmPx, setMeasureRatioMmPx] = useState<number>(1); // mm por pixel
-    const [inputMeasureMm, setInputMeasureMm] = useState<string>("100.0"); // mm de referencia input
+    const [measureMode, setMeasureMode] = useState<'punto' | 'segmentos'>('punto');
+    const dragPointIdx = useRef<number | null>(null);
+    const wasDraggingPoint = useRef(false);
+    const dragTrackPoint = useRef<'A' | 'B' | null>(null);
+    const [showLabels, setShowLabels] = useState(true);
+    const [calBoardCollapsed, setCalBoardCollapsed] = useState(true);
+    const [calMeasureCollapsed, setCalMeasureCollapsed] = useState(false);
+    const [calDetections, setCalDetections] = useState<any[]>([]);
+    const [calShowDetectionLabels, setCalShowDetectionLabels] = useState(true);
+    const [calAnalyzing, setCalAnalyzing] = useState(false);
+    const [calAnalyzeCollapsed, setCalAnalyzeCollapsed] = useState(false);
 
-    // Segmentación
-    const [segmentActive, setSegmentActive] = useState(false);
-    const [segmentTool, setSegmentTool] = useState<'point' | 'rect' | 'circle' | 'polygon'>('point');
-    const [segmentDrawPoints, setSegmentDrawPoints] = useState<{ x: number, y: number }[]>([]);
-    const [segmentContour, setSegmentContour] = useState<{ x: number, y: number }[] | null>(null);
-    const [segmentResult, setSegmentResult] = useState<{ area_px: number, cx: number, cy: number } | null>(null);
-    const [segmentTolerance, setSegmentTolerance] = useState<number | string>(30); // 1-255
+    // Track definition
+    type TrackPiece = { det: any; point: { x: number; y: number }; mode: 'centro' | 'arista'; edge?: 'top' | 'bottom' | 'left' | 'right' };
+    const [trackMode, setTrackMode] = useState(false);
+    const [trackPointMode, setTrackPointMode] = useState<'centro' | 'arista'>('centro');
+    const [trackPieceA, setTrackPieceA] = useState<TrackPiece | null>(null);
+    const [trackPieceB, setTrackPieceB] = useState<TrackPiece | null>(null);
+    const [trackSpec, setTrackSpec] = useState<{ classA: string; classB: string; distanceMm: number; centerA: { x: number; y: number }; centerB: { x: number; y: number } } | null>(() => {
+        const saved = localStorage.getItem('trackSpec');
+        return saved ? JSON.parse(saved) : null;
+    });
+
+    // Draggable dimension labels (offsets from default position)
+    const dimLabelOffsets = useRef<{ x: { dx: number; dy: number }; y: { dx: number; dy: number }; total: { dx: number; dy: number } }>({
+        x: { dx: 0, dy: 0 }, y: { dx: 0, dy: 0 }, total: { dx: 0, dy: 0 },
+    });
+    const dragDimLabel = useRef<{ which: 'x' | 'y' | 'total'; startMouse: { x: number; y: number }; startOffset: { dx: number; dy: number } } | null>(null);
+    // Store label hit areas for click detection
+    const dimLabelRects = useRef<{ x: { x: number; y: number; w: number; h: number }; y: { x: number; y: number; w: number; h: number }; total: { x: number; y: number; w: number; h: number } } | null>(null);
+    const [moveDimLabels, setMoveDimLabels] = useState(false);
+
 
 
     const [calCapturing, setCalCapturing] = useState(false);
     const [calComputing, setCalComputing] = useState(false);
     const [calMsg, setCalMsg] = useState<{ ok: boolean; text: string } | null>(null);
     const [calSaveDir, setCalSaveDir] = useState('C:\\Users\\franj\\OneDrive\\Escritorio\\COSAS  FRAN\\PROYECTOS\\PINTURA\\CALIBRACION');
+
+    // ── Calibrar escala (imagen de referencia) ──────────────────────────────
+
+    const [scaleCalImageSrc, setScaleCalImageSrc] = useState<string | null>(null);
+    const [scaleCalPoints, setScaleCalPoints] = useState<{ x: number, y: number }[]>([]);
+    const [scaleCalRealMm, setScaleCalRealMm] = useState<string>('');
+    const [scaleCalMmPerPx, setScaleCalMmPerPx] = useState<number>(() => {
+        const saved = localStorage.getItem('calibration_mmPerPx');
+        return saved ? parseFloat(saved) : 0;
+    });
+    const scaleCalCanvasRef = useRef<HTMLCanvasElement>(null);
+    const scaleCalImageRef = useRef<HTMLImageElement | null>(null);
+
+    // Zoom & Pan state
+    const [calZoom, setCalZoom] = useState(1);
+    const [calPan, setCalPan] = useState({ x: 0, y: 0 });
+    const [calZoomMode, setCalZoomMode] = useState(false);
+    const [calPanMode, setCalPanMode] = useState(false);
+    const calDragging = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
+
+    const redrawScaleCalCanvas = () => {
+        const canvas = scaleCalCanvasRef.current;
+        const img = scaleCalImageRef.current;
+        if (!canvas || !img) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.translate(calPan.x, calPan.y);
+        ctx.scale(calZoom, calZoom);
+        ctx.drawImage(img, 0, 0);
+
+        // ── Draw Roboflow detections ──
+        if (calDetections.length > 0) {
+            const getClassColor = (cn: string) => {
+                const cols = ['#BD00FF', '#00FFFF', '#FF00FF', '#70FF00', '#FFBD00', '#FF0000', '#0070FF', '#FF00BD', '#00FF70', '#BDFF00'];
+                let h = 0; if (cn) for (let i = 0; i < cn.length; i++) h = cn.charCodeAt(i) + ((h << 5) - h);
+                return cols[Math.abs(h) % cols.length];
+            };
+            const hexToRgba = (hex: string, a: number) => {
+                const r = parseInt(hex.slice(1, 3), 16) || 0, g = parseInt(hex.slice(3, 5), 16) || 0, b = parseInt(hex.slice(5, 7), 16) || 0;
+                return `rgba(${r},${g},${b},${a})`;
+            };
+            calDetections.forEach(det => {
+                const conf = det.confidence ?? 1.0;
+                const color = det.class ? getClassColor(det.class) : '#BD00FF';
+                let dx = det.x, dy = det.y, dw = det.width, dh = det.height;
+                const isNorm = (dx > 0 && dx <= 1.1) && (dw > 0 && dw <= 1.1);
+                if (isNorm) { dx *= img.naturalWidth; dy *= img.naturalHeight; dw *= img.naturalWidth; dh *= img.naturalHeight; }
+
+                // Segmentation polygon
+                if (det.points && Array.isArray(det.points) && det.points.length > 0) {
+                    ctx.beginPath();
+                    det.points.forEach((pt: any, idx: number) => {
+                        let ptx = pt.x, pty = pt.y;
+                        if (isNorm) { ptx *= img.naturalWidth; pty *= img.naturalHeight; }
+                        idx === 0 ? ctx.moveTo(ptx, pty) : ctx.lineTo(ptx, pty);
+                    });
+                    ctx.closePath();
+                    ctx.fillStyle = hexToRgba(color, 0.3);
+                    ctx.fill();
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = Math.max(2, img.naturalWidth / 600);
+                    ctx.stroke();
+                }
+
+                // Bounding box
+                if (dx !== undefined && dw !== undefined) {
+                    const bx = dx - dw / 2, by = dy - dh / 2;
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = Math.max(3, img.naturalWidth / 500);
+                    ctx.strokeRect(bx, by, dw, dh);
+
+                    // Label
+                    if (calShowDetectionLabels) {
+                        const label = `${det.class || 'Obj'} ${(conf * 100).toFixed(0)}%`;
+                        const fs = Math.max(14, img.naturalWidth / 100);
+                        ctx.font = `bold ${fs}px Inter, sans-serif`;
+                        const tw = ctx.measureText(label).width;
+                        ctx.fillStyle = color;
+                        ctx.fillRect(bx - 1, by - fs - 8, tw + 12, fs + 8);
+                        ctx.fillStyle = '#fff';
+                        ctx.textAlign = 'left';
+                        ctx.fillText(label, bx + 5, by - 5);
+                    }
+                }
+            });
+        }
+
+        scaleCalPoints.forEach((p, i) => {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, Math.max(8, img.naturalWidth / 200), 0, Math.PI * 2);
+            ctx.fillStyle = i === 0 ? '#00ff64' : '#ff3b30';
+            ctx.fill();
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            if (showLabels) {
+                ctx.fillStyle = '#fff';
+                ctx.font = `bold ${Math.max(14, img.naturalWidth / 100)}px Inter, sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.fillText(`P${i + 1}`, p.x, p.y - Math.max(14, img.naturalWidth / 100));
+            }
+        });
+        if (scaleCalPoints.length === 2) {
+            ctx.beginPath();
+            ctx.moveTo(scaleCalPoints[0].x, scaleCalPoints[0].y);
+            ctx.lineTo(scaleCalPoints[1].x, scaleCalPoints[1].y);
+            ctx.strokeStyle = '#00ff64';
+            ctx.lineWidth = Math.max(3, img.naturalWidth / 500);
+            ctx.setLineDash([8, 6]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            const distPx = Math.hypot(scaleCalPoints[1].x - scaleCalPoints[0].x, scaleCalPoints[1].y - scaleCalPoints[0].y);
+            const mx = (scaleCalPoints[0].x + scaleCalPoints[1].x) / 2;
+            const my = (scaleCalPoints[0].y + scaleCalPoints[1].y) / 2;
+            if (showLabels) {
+                const fs = Math.max(14, img.naturalWidth / 100);
+                ctx.fillStyle = 'rgba(0,0,0,0.75)';
+                ctx.fillRect(mx - fs * 4, my - fs * 1.6, fs * 8, fs * 1.8);
+                ctx.fillStyle = '#00ff64';
+                ctx.font = `bold ${fs}px monospace`;
+                ctx.textAlign = 'center';
+                ctx.fillText(`${distPx.toFixed(1)} px`, mx, my - 2);
+            }
+        }
+        // Also draw measurePoints if measurement is active on uploaded image
+        if (measureActive && measurePoints.length > 0) {
+            const r = Math.max(4, img.naturalWidth / 400);
+            const fs2 = Math.max(11, img.naturalWidth / 140);
+            const lw = Math.max(2, img.naturalWidth / 600);
+            const fs3 = Math.max(12, img.naturalWidth / 120);
+
+            if (measureMode === 'punto') {
+                // ── PUNTO mode: 2 points, 1 segment ──
+                measurePoints.forEach((p, i) => {
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+                    ctx.fillStyle = i === 0 ? '#1f6feb' : '#ff6b35';
+                    ctx.fill();
+                    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+                });
+                if (measurePoints.length === 2) {
+                    const [p1, p2] = measurePoints;
+                    ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y);
+                    ctx.strokeStyle = '#1f6feb'; ctx.lineWidth = lw;
+                    ctx.setLineDash([8, 5]); ctx.stroke(); ctx.setLineDash([]);
+                    const dPx = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                    const smx = (p1.x + p2.x) / 2, smy = (p1.y + p2.y) / 2;
+                    const mmVal = scaleCalMmPerPx > 0 ? dPx * scaleCalMmPerPx : 0;
+                    if (showLabels) {
+                        const boxH = mmVal > 0 ? fs3 * 2.6 : fs3 * 1.5;
+                        ctx.fillStyle = 'rgba(0,0,0,0.8)';
+                        const labelW = fs3 * 7;
+                        ctx.fillRect(smx - labelW / 2, smy + 6, labelW, boxH);
+                        ctx.fillStyle = '#1f6feb'; ctx.font = `bold ${fs3}px monospace`; ctx.textAlign = 'center';
+                        ctx.fillText(`${dPx.toFixed(1)} px`, smx, smy + 6 + fs3 * 1.1);
+                        if (mmVal > 0) { ctx.fillStyle = '#00ff64'; ctx.fillText(`${mmVal.toFixed(2)} mm`, smx, smy + 6 + fs3 * 2.2); }
+                    }
+                }
+            } else {
+                // ── SEGMENTOS mode: 4 points = 2 segments, distance between them ──
+                const colors = ['#1f6feb', '#1f6feb', '#ff6b35', '#ff6b35'];
+                measurePoints.forEach((p, i) => {
+                    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+                    ctx.fillStyle = colors[i] || '#ff6b35'; ctx.fill();
+                    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+                });
+                // Segment A (points 0-1)
+                if (measurePoints.length >= 2) {
+                    const [a1, a2] = [measurePoints[0], measurePoints[1]];
+                    ctx.beginPath(); ctx.moveTo(a1.x, a1.y); ctx.lineTo(a2.x, a2.y);
+                    ctx.strokeStyle = '#1f6feb'; ctx.lineWidth = lw;
+                    ctx.setLineDash([8, 5]); ctx.stroke(); ctx.setLineDash([]);
+                    const midAx = (a1.x + a2.x) / 2, midAy = (a1.y + a2.y) / 2;
+                    if (showLabels) {
+                        ctx.fillStyle = '#1f6feb'; ctx.font = `bold ${fs2}px monospace`;
+                        ctx.textAlign = 'center';
+                        ctx.fillText('A', midAx, midAy - fs2 * 0.8);
+                    }
+                }
+                // Segment B (points 2-3)
+                if (measurePoints.length >= 4) {
+                    const [b1, b2] = [measurePoints[2], measurePoints[3]];
+                    ctx.beginPath(); ctx.moveTo(b1.x, b1.y); ctx.lineTo(b2.x, b2.y);
+                    ctx.strokeStyle = '#ff6b35'; ctx.lineWidth = lw;
+                    ctx.setLineDash([8, 5]); ctx.stroke(); ctx.setLineDash([]);
+                    const midBx = (b1.x + b2.x) / 2, midBy = (b1.y + b2.y) / 2;
+                    if (showLabels) {
+                        ctx.fillStyle = '#ff6b35'; ctx.font = `bold ${fs2}px monospace`;
+                        ctx.textAlign = 'center';
+                        ctx.fillText('B', midBx, midBy - fs2 * 0.8);
+                    }
+
+                    // Distance between midpoints of A and B
+                    const [a1, a2] = [measurePoints[0], measurePoints[1]];
+                    const midAx = (a1.x + a2.x) / 2, midAy = (a1.y + a2.y) / 2;
+                    const distPx = Math.hypot(midBx - midAx, midBy - midAy);
+                    const mmVal = scaleCalMmPerPx > 0 ? distPx * scaleCalMmPerPx : 0;
+
+                    // Connector line between midpoints
+                    ctx.beginPath(); ctx.moveTo(midAx, midAy); ctx.lineTo(midBx, midBy);
+                    ctx.strokeStyle = '#00ff64'; ctx.lineWidth = lw;
+                    ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+
+                    // Label
+                    const lx = (midAx + midBx) / 2, ly = (midAy + midBy) / 2;
+                    if (showLabels) {
+                        const boxH = mmVal > 0 ? fs3 * 2.8 : fs3 * 1.5;
+                        const labelW = fs3 * 8;
+                        ctx.fillStyle = 'rgba(0,0,0,0.85)';
+                        ctx.fillRect(lx - labelW / 2, ly - boxH / 2, labelW, boxH);
+                        ctx.fillStyle = '#00ff64'; ctx.font = `bold ${fs3 * 1.1}px monospace`; ctx.textAlign = 'center';
+                        ctx.fillText(`${distPx.toFixed(1)} px`, lx, ly - (mmVal > 0 ? fs3 * 0.3 : 0) + fs3 * 0.3);
+                        if (mmVal > 0) { ctx.fillText(`${mmVal.toFixed(2)} mm`, lx, ly + fs3 * 1.1); }
+                    }
+                }
+            }
+        }
+        // ── Draw Track highlights ──
+        const drawTrackPiece = (piece: TrackPiece, label: string, highlightColor: string) => {
+            const det = piece.det;
+            let dx = det.x, dy = det.y, dw = det.width, dh = det.height;
+            const isNorm = (dx > 0 && dx <= 1.1) && (dw > 0 && dw <= 1.1);
+            if (isNorm) { dx *= img.naturalWidth; dy *= img.naturalHeight; dw *= img.naturalWidth; dh *= img.naturalHeight; }
+            const bx = dx - dw / 2, by = dy - dh / 2;
+            // Bounding box
+            ctx.strokeStyle = highlightColor;
+            ctx.lineWidth = Math.max(4, img.naturalWidth / 300);
+            ctx.setLineDash([10, 5]);
+            ctx.strokeRect(bx, by, dw, dh);
+            ctx.setLineDash([]);
+            // Label
+            const fs = Math.max(16, img.naturalWidth / 80);
+            ctx.font = `bold ${fs}px Inter, sans-serif`;
+            ctx.fillStyle = highlightColor;
+            ctx.textAlign = 'center';
+            ctx.fillText(label, dx, by - fs * 0.5);
+
+            // Highlight selected edge if arista mode
+            if (piece.mode === 'arista' && piece.edge) {
+                ctx.strokeStyle = '#FFFF00'; ctx.lineWidth = Math.max(5, img.naturalWidth / 200);
+                ctx.setLineDash([]); ctx.beginPath();
+                switch (piece.edge) {
+                    case 'top': ctx.moveTo(bx, by); ctx.lineTo(bx + dw, by); break;
+                    case 'bottom': ctx.moveTo(bx, by + dh); ctx.lineTo(bx + dw, by + dh); break;
+                    case 'left': ctx.moveTo(bx, by); ctx.lineTo(bx, by + dh); break;
+                    case 'right': ctx.moveTo(bx + dw, by); ctx.lineTo(bx + dw, by + dh); break;
+                }
+                ctx.stroke();
+            }
+
+            // Draw the measurement point
+            const px = piece.point.x, py = piece.point.y;
+            ctx.beginPath();
+            ctx.arc(px, py, Math.max(6, img.naturalWidth / 250), 0, Math.PI * 2);
+            ctx.fillStyle = highlightColor; ctx.fill();
+            ctx.strokeStyle = '#000'; ctx.lineWidth = 2; ctx.stroke();
+
+            return piece.point;
+        };
+
+        let trackCenterA: { x: number, y: number } | null = null;
+        let trackCenterB: { x: number, y: number } | null = null;
+        if (trackPieceA) trackCenterA = drawTrackPiece(trackPieceA, `A: ${trackPieceA.det.class || 'Obj'}`, '#00FFFF');
+        if (trackPieceB) trackCenterB = drawTrackPiece(trackPieceB, `B: ${trackPieceB.det.class || 'Obj'}`, '#FF00FF');
+
+        if (trackCenterA && trackCenterB) {
+            const dxPx = Math.abs(trackCenterB.x - trackCenterA.x);
+            const dyPx = Math.abs(trackCenterB.y - trackCenterA.y);
+            const distPx = Math.hypot(dxPx, dyPx);
+            const dxMm = scaleCalMmPerPx > 0 ? dxPx * scaleCalMmPerPx : 0;
+            const dyMm = scaleCalMmPerPx > 0 ? dyPx * scaleCalMmPerPx : 0;
+            const distMm = scaleCalMmPerPx > 0 ? distPx * scaleCalMmPerPx : 0;
+            const lw = Math.max(3, img.naturalWidth / 400);
+            const fs = Math.max(16, img.naturalWidth / 70);
+
+            // Connecting line (diagonal)
+            ctx.beginPath(); ctx.moveTo(trackCenterA.x, trackCenterA.y); ctx.lineTo(trackCenterB.x, trackCenterB.y);
+            ctx.strokeStyle = '#FFFF00'; ctx.lineWidth = lw;
+            ctx.setLineDash([8, 5]); ctx.stroke(); ctx.setLineDash([]);
+
+            // X guide line (horizontal)
+            ctx.beginPath(); ctx.moveTo(trackCenterA.x, trackCenterA.y); ctx.lineTo(trackCenterB.x, trackCenterA.y);
+            ctx.strokeStyle = '#FF6600'; ctx.lineWidth = lw * 0.7;
+            ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
+
+            // Y guide line (vertical)
+            ctx.beginPath(); ctx.moveTo(trackCenterB.x, trackCenterA.y); ctx.lineTo(trackCenterB.x, trackCenterB.y);
+            ctx.strokeStyle = '#00FF66'; ctx.lineWidth = lw * 0.7;
+            ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
+
+            // X label (draggable)
+            const ofsX = dimLabelOffsets.current.x;
+            const xLabelX = (trackCenterA.x + trackCenterB.x) / 2 + ofsX.dx;
+            const xLabelY = trackCenterA.y - fs * 0.8 + ofsX.dy;
+            const xText = dxMm > 0 ? `X: ${dxMm.toFixed(2)} mm` : `X: ${dxPx.toFixed(1)} px`;
+            ctx.font = `bold ${fs * 0.85}px Inter, sans-serif`; ctx.textAlign = 'center';
+            const xTw = ctx.measureText(xText).width;
+            const xRectX = xLabelX - xTw / 2 - 6, xRectY = xLabelY - fs * 0.4, xRectW = xTw + 12, xRectH = fs * 0.9;
+            ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(xRectX, xRectY, xRectW, xRectH);
+            ctx.fillStyle = '#FF6600'; ctx.fillText(xText, xLabelX, xLabelY + fs * 0.25);
+
+            // Y label (draggable)
+            const ofsY = dimLabelOffsets.current.y;
+            const yLabelX = trackCenterB.x + fs * 0.6 + ofsY.dx;
+            const yLabelY = (trackCenterA.y + trackCenterB.y) / 2 + ofsY.dy;
+            const yText = dyMm > 0 ? `Y: ${dyMm.toFixed(2)} mm` : `Y: ${dyPx.toFixed(1)} px`;
+            const yTw = ctx.measureText(yText).width;
+            const yRectX = yLabelX - 6, yRectY2 = yLabelY - fs * 0.4, yRectW = yTw + 12, yRectH = fs * 0.9;
+            ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(yRectX, yRectY2, yRectW, yRectH);
+            ctx.fillStyle = '#00FF66'; ctx.fillText(yText, yLabelX + yTw / 2, yLabelY + fs * 0.25);
+            ctx.textAlign = 'center';
+
+            // Total distance label (draggable)
+            const ofsT = dimLabelOffsets.current.total;
+            const tLabelX = (trackCenterA.x + trackCenterB.x) / 2 + ofsT.dx;
+            const tLabelY = (trackCenterA.y + trackCenterB.y) / 2 + ofsT.dy;
+            const totalText = distMm > 0 ? `${distPx.toFixed(1)} px = ${distMm.toFixed(2)} mm` : `${distPx.toFixed(1)} px`;
+            ctx.font = `bold ${fs}px Inter, sans-serif`;
+            const tw = ctx.measureText(totalText).width;
+            const tRectX = tLabelX - tw / 2 - 10, tRectY = tLabelY - fs / 2 - 6, tRectW = tw + 20, tRectH = fs + 12;
+            ctx.fillStyle = 'rgba(0,0,0,0.85)';
+            ctx.fillRect(tRectX, tRectY, tRectW, tRectH);
+            ctx.fillStyle = '#FFFF00'; ctx.fillText(totalText, tLabelX, tLabelY + fs * 0.35);
+
+            // Store hit rects for drag detection (in image coordinates)
+            dimLabelRects.current = {
+                x: { x: xRectX, y: xRectY, w: xRectW, h: xRectH },
+                y: { x: yRectX, y: yRectY2, w: yRectW, h: yRectH },
+                total: { x: tRectX, y: tRectY, w: tRectW, h: tRectH },
+            };
+        }
+
+        ctx.restore();
+    };
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useEffect(() => { redrawScaleCalCanvas(); }, [scaleCalImageSrc, scaleCalPoints, measurePoints, measureActive, calZoom, calPan, showLabels, calDetections, calShowDetectionLabels, trackPieceA, trackPieceB]);
+
+    // Analyze calibration image with Roboflow
+    const analyzeCalImage = async () => {
+        if (!scaleCalImageSrc) { log('error', 'No hay imagen para analizar'); return; }
+        setCalAnalyzing(true);
+        try {
+            const res = await fetch('http://127.0.0.1:8765/api/measure/roboflow', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: scaleCalImageSrc }),
+            });
+            const data = await res.json();
+            if (!data.ok) throw new Error(data.error);
+            const preds: any[] = Array.isArray(data.predictions) ? data.predictions : [];
+            setCalDetections(preds);
+            log('success', `Roboflow: ${preds.length} detecciones`);
+        } catch (err: any) {
+            console.error('[CAL Roboflow]', err);
+            log('error', `Error Roboflow: ${err.message}`);
+        } finally {
+            setCalAnalyzing(false);
+        }
+    };
+
+    // Redraw when returning to calibration tab
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useEffect(() => {
+        if (activeTab === 'calibration' && scaleCalImageSrc && scaleCalImageRef.current) {
+            requestAnimationFrame(() => { requestAnimationFrame(() => { redrawScaleCalCanvas(); }); });
+        }
+    }, [activeTab]);
+
+    const handleScaleCalImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setCalZoom(1); setCalPan({ x: 0, y: 0 });
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            const src = ev.target?.result as string;
+            // Load the image FIRST, then set state so canvas is rendered
+            const img = new Image();
+            img.onload = () => {
+                scaleCalImageRef.current = img;
+                setScaleCalPoints([]);
+                setScaleCalImageSrc(src);
+                // Wait for React to render the canvas, then draw
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        redrawScaleCalCanvas();
+                    });
+                });
+            };
+            img.src = src;
+        };
+        reader.readAsDataURL(file);
+    };
+
+    // Helper: convert screen event to image coordinates
+    const screenToImageCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        const canvas = scaleCalCanvasRef.current;
+        const img = scaleCalImageRef.current;
+        if (!canvas || !img) return null;
+        const rect = canvas.getBoundingClientRect();
+        const canvasScaleX = img.naturalWidth / rect.width;
+        const canvasScaleY = img.naturalHeight / rect.height;
+        const canvasX = (e.clientX - rect.left) * canvasScaleX;
+        const canvasY = (e.clientY - rect.top) * canvasScaleY;
+        return { x: (canvasX - calPan.x) / calZoom, y: (canvasY - calPan.y) / calZoom };
+    };
+
+    // Find if mouse is near an existing point (within threshold px in image space)
+    const findNearPoint = (imgX: number, imgY: number, threshold = 15) => {
+        for (let i = 0; i < measurePoints.length; i++) {
+            const d = Math.hypot(measurePoints[i].x - imgX, measurePoints[i].y - imgY);
+            if (d < threshold / calZoom) return i;
+        }
+        return -1;
+    };
+
+    // Find which detection is at a given image coordinate
+    const findDetectionAtPoint = (imgX: number, imgY: number): any | null => {
+        const img = scaleCalImageRef.current;
+        if (!img) return null;
+        for (const det of calDetections) {
+            let dx = det.x, dy = det.y, dw = det.width, dh = det.height;
+            const isNorm = (dx > 0 && dx <= 1.1) && (dw > 0 && dw <= 1.1);
+            if (isNorm) { dx *= img.naturalWidth; dy *= img.naturalHeight; dw *= img.naturalWidth; dh *= img.naturalHeight; }
+            const left = dx - dw / 2, top = dy - dh / 2;
+            if (imgX >= left && imgX <= left + dw && imgY >= top && imgY <= top + dh) return det;
+        }
+        return null;
+    };
+
+    const handleScaleCalCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        // Block all click actions when moving dimension labels
+        if (moveDimLabels) return;
+        // Track mode: select pieces
+        if (trackMode && calDetections.length > 0) {
+            const coords = screenToImageCoords(e);
+            if (!coords) return;
+            const det = findDetectionAtPoint(coords.x, coords.y);
+            if (!det) return;
+
+            const imgEl = scaleCalImageRef.current;
+            if (!imgEl) return;
+
+            // Resolve detection bbox in image pixels
+            let dx = det.x, dy = det.y, dw = det.width, dh = det.height;
+            const isNorm = (dx > 0 && dx <= 1.1) && (dw > 0 && dw <= 1.1);
+            if (isNorm) { dx *= imgEl.naturalWidth; dy *= imgEl.naturalHeight; dw *= imgEl.naturalWidth; dh *= imgEl.naturalHeight; }
+            const bx = dx - dw / 2, by = dy - dh / 2;
+
+            let point: { x: number; y: number };
+            let edgeName: 'top' | 'bottom' | 'left' | 'right' | undefined;
+
+            if (trackPointMode === 'arista') {
+                // Find closest edge to click
+                const distances = [
+                    { edge: 'top' as const, d: Math.abs(coords.y - by), pt: { x: bx + dw / 2, y: by } },
+                    { edge: 'bottom' as const, d: Math.abs(coords.y - (by + dh)), pt: { x: bx + dw / 2, y: by + dh } },
+                    { edge: 'left' as const, d: Math.abs(coords.x - bx), pt: { x: bx, y: by + dh / 2 } },
+                    { edge: 'right' as const, d: Math.abs(coords.x - (bx + dw)), pt: { x: bx + dw, y: by + dh / 2 } },
+                ];
+                distances.sort((a, b) => a.d - b.d);
+                edgeName = distances[0].edge;
+                point = distances[0].pt;
+            } else {
+                // Centro mode
+                point = { x: dx, y: dy };
+            }
+
+            const piece: TrackPiece = { det, point, mode: trackPointMode, edge: edgeName };
+
+            if (!trackPieceA) {
+                setTrackPieceA(piece);
+                log('info', `Track pieza A: ${det.class || 'Obj'} (${trackPointMode}${edgeName ? ' ' + edgeName : ''})`);
+            } else if (!trackPieceB) {
+                setTrackPieceB(piece);
+                log('info', `Track pieza B: ${det.class || 'Obj'} (${trackPointMode}${edgeName ? ' ' + edgeName : ''})`);
+            } else {
+                setTrackPieceA(piece);
+                setTrackPieceB(null);
+                log('info', `Track reiniciado. Pieza A: ${det.class || 'Obj'}`);
+            }
+            return;
+        }
+
+        if (!measureActive) return;
+        if (calDragging.current) return;
+        if (wasDraggingPoint.current) { wasDraggingPoint.current = false; return; }
+        const coords = screenToImageCoords(e);
+        if (!coords) return;
+        const { x, y } = coords;
+        if (findNearPoint(x, y) >= 0) return;
+        if (measureMode === 'punto') {
+            setMeasurePoints(prev => prev.length >= 2 ? [{ x, y }] : [...prev, { x, y }]);
+        } else {
+            setMeasurePoints(prev => prev.length >= 4 ? [{ x, y }] : [...prev, { x, y }]);
+        }
+    };
+
+    // Save track specification
+    const saveTrackSpecification = async () => {
+        if (!trackPieceA || !trackPieceB) return;
+        const img = scaleCalImageRef.current;
+        if (!img) return;
+
+        // Use the stored points from pieces
+        const cA = trackPieceA.point;
+        const cB = trackPieceB.point;
+        const dxPx = Math.abs(cB.x - cA.x);
+        const dyPx = Math.abs(cB.y - cA.y);
+        const distPx = Math.hypot(dxPx, dyPx);
+        const dxMm = scaleCalMmPerPx > 0 ? dxPx * scaleCalMmPerPx : 0;
+        const dyMm = scaleCalMmPerPx > 0 ? dyPx * scaleCalMmPerPx : 0;
+        const distMm = scaleCalMmPerPx > 0 ? distPx * scaleCalMmPerPx : 0;
+
+        const spec = {
+            classA: trackPieceA.det.class || 'Obj',
+            classB: trackPieceB.det.class || 'Obj',
+            distanceMm: distMm,
+            distanceXMm: dxMm,
+            distanceYMm: dyMm,
+            distancePx: distPx,
+            distanceXPx: dxPx,
+            distanceYPx: dyPx,
+            mmPerPx: scaleCalMmPerPx,
+            centerA: cA,
+            centerB: cB,
+            pieceAMode: trackPieceA.mode,
+            pieceAEdge: trackPieceA.edge,
+            pieceBMode: trackPieceB.mode,
+            pieceBEdge: trackPieceB.edge,
+        };
+
+        // Save spec in localStorage for TEST screen
+        localStorage.setItem('trackSpec', JSON.stringify(spec));
+        setTrackSpec(spec);
+
+        // Save image and JSON to disk
+        const saveDir = 'C:\\Users\\franj\\OneDrive\\Escritorio\\COSAS  FRAN\\PROYECTOS\\PINTURA\\CALIBRACION\\ESPECIFICACION TRACK';
+        let imageToSave: string | null = null;
+        if (scaleCalCanvasRef.current) {
+            try { imageToSave = scaleCalCanvasRef.current.toDataURL('image/png'); } catch { /* */ }
+        }
+        if (!imageToSave && scaleCalImageSrc) imageToSave = scaleCalImageSrc;
+        if (!imageToSave) { alert('No hay imagen'); return; }
+
+        try {
+            // Read active tolerances from localStorage
+            const savedTol = localStorage.getItem('trackTolerances');
+            const tolerances: Array<{ className: string; enabled: boolean }> = savedTol ? JSON.parse(savedTol) : [];
+            const activeLabels = tolerances.filter(t => t.enabled).map(t => t.className.trim());
+
+            console.log('[TRACK SAVE] Active tolerance labels:', activeLabels);
+            console.log('[TRACK SAVE] All detections:', calDetections.map((d: any) => d.class));
+
+            // Find which active tolerance labels are present in the image detections
+            const matchedLabels: string[] = [];
+            for (const label of activeLabels) {
+                const found = calDetections.some((d: any) =>
+                    (d.class || '').trim().toLowerCase() === label.toLowerCase()
+                );
+                if (found) matchedLabels.push(label);
+            }
+
+            console.log('[TRACK SAVE] Matched active labels in image:', matchedLabels);
+
+            // Build filename: use matched active labels, fallback to track piece classes
+            const fileLabel = matchedLabels.length > 0
+                ? matchedLabels.map(l => l.replace(/[^a-zA-Z0-9_-]/g, '_')).join('_')
+                : `${(spec.classA || 'A').replace(/[^a-zA-Z0-9_-]/g, '_')}_${(spec.classB || 'B').replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+            const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+            const imgFilename = `track_${fileLabel}_${ts}.png`;
+            const specFilename = `track_spec_${fileLabel}.json`;
+            console.log('[TRACK SAVE] Image filename:', imgFilename);
+
+            // Save image
+            const resImg = await fetch('http://127.0.0.1:8765/api/save-calibration-image', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ image: imageToSave, directory: saveDir, mmPerPx: scaleCalMmPerPx, filename: imgFilename }),
+            });
+            const dataImg = await resImg.json();
+
+            // Save JSON spec
+            const resSpec = await fetch('http://127.0.0.1:8765/api/save-calibration-image', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image: 'data:application/json;base64,' + btoa(JSON.stringify(spec, null, 2)),
+                    directory: saveDir,
+                    mmPerPx: 0,
+                    filename: specFilename,
+                }),
+            });
+            const dataSpec = await resSpec.json();
+
+            if (dataImg.ok) {
+                log('success', `Track guardado: ${dataImg.path}`);
+
+                // Update tolerance measuredValue with X distance for matched active labels
+                if (matchedLabels.length > 0) {
+                    const savedTolUpdate = localStorage.getItem('trackTolerances');
+                    if (savedTolUpdate) {
+                        const tolArr = JSON.parse(savedTolUpdate);
+                        let updated = false;
+                        for (const tol of tolArr) {
+                            if (matchedLabels.some(ml => ml.toLowerCase() === tol.className.trim().toLowerCase())) {
+                                tol.measuredValue = parseFloat(dxMm.toFixed(2));
+                                updated = true;
+                                console.log(`[TRACK SAVE] Updated tolerance '${tol.className}' measuredValue = ${dxMm.toFixed(2)} mm (X)`);
+                            }
+                        }
+                        if (updated) {
+                            localStorage.setItem('trackTolerances', JSON.stringify(tolArr));
+                        }
+                    }
+                }
+
+                alert(`✅ Track especificado y guardado.\n${spec.classA} ↔ ${spec.classB}\nX: ${dxMm.toFixed(2)} mm | Y: ${dyMm.toFixed(2)} mm\nTotal: ${distMm.toFixed(2)} mm (${distPx.toFixed(1)} px)\n\nImagen: ${dataImg.path}\nSpec: ${dataSpec.ok ? dataSpec.path : 'error'}`);
+            } else {
+                alert(`❌ Error: ${dataImg.error}`);
+            }
+        } catch (err: any) {
+            alert(`❌ Error de conexión: ${err.message}`);
+        }
+    };
+
+
+    // Zoom with mouse wheel (only when zoom mode active)
+    const handleCalCanvasWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+        e.preventDefault();
+        if (!calZoomMode) return;
+        const canvas = scaleCalCanvasRef.current;
+        const img = scaleCalImageRef.current;
+        if (!canvas || !img) return;
+        const rect = canvas.getBoundingClientRect();
+        const canvasScaleX = img.naturalWidth / rect.width;
+        const canvasScaleY = img.naturalHeight / rect.height;
+        const mouseX = (e.clientX - rect.left) * canvasScaleX;
+        const mouseY = (e.clientY - rect.top) * canvasScaleY;
+        const delta = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const newZoom = Math.max(0.2, Math.min(20, calZoom * delta));
+        const newPanX = mouseX - (mouseX - calPan.x) * (newZoom / calZoom);
+        const newPanY = mouseY - (mouseY - calPan.y) * (newZoom / calZoom);
+        setCalZoom(newZoom);
+        setCalPan({ x: newPanX, y: newPanY });
+    };
+
+    // Mouse down: start dragging a point OR start panning
+    const handleCalCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        // Check for dimension label dragging first (only when mode active)
+        if (moveDimLabels && e.button === 0 && dimLabelRects.current) {
+            const coords = screenToImageCoords(e);
+            if (coords) {
+                const rects = dimLabelRects.current;
+                for (const key of ['x', 'y', 'total'] as const) {
+                    const r = rects[key];
+                    if (coords.x >= r.x && coords.x <= r.x + r.w && coords.y >= r.y && coords.y <= r.y + r.h) {
+                        e.preventDefault();
+                        dragDimLabel.current = {
+                            which: key,
+                            startMouse: { x: coords.x, y: coords.y },
+                            startOffset: { ...dimLabelOffsets.current[key] },
+                        };
+                        return;
+                    }
+                }
+            }
+        }
+        // Check for track point dragging
+        if (e.button === 0 && (trackPieceA || trackPieceB)) {
+            const coords = screenToImageCoords(e);
+            if (coords) {
+                const threshold = 20 / calZoom;
+                if (trackPieceA && Math.hypot(coords.x - trackPieceA.point.x, coords.y - trackPieceA.point.y) < threshold) {
+                    e.preventDefault();
+                    dragTrackPoint.current = 'A';
+                    return;
+                }
+                if (trackPieceB && Math.hypot(coords.x - trackPieceB.point.x, coords.y - trackPieceB.point.y) < threshold) {
+                    e.preventDefault();
+                    dragTrackPoint.current = 'B';
+                    return;
+                }
+            }
+        }
+        // Check for point dragging first (when measuring is active)
+        if (measureActive && e.button === 0 && measurePoints.length > 0) {
+            const coords = screenToImageCoords(e);
+            if (coords) {
+                const idx = findNearPoint(coords.x, coords.y);
+                if (idx >= 0) {
+                    e.preventDefault();
+                    dragPointIdx.current = idx;
+                    return;
+                }
+            }
+        }
+        // Pan mode
+        if (!calPanMode) return;
+        e.preventDefault();
+        calDragging.current = { startX: e.clientX, startY: e.clientY, panX: calPan.x, panY: calPan.y };
+    };
+
+    const handleCalCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        // Dragging a dimension label
+        if (dragDimLabel.current) {
+            const coords = screenToImageCoords(e);
+            if (coords) {
+                const d = dragDimLabel.current;
+                dimLabelOffsets.current[d.which] = {
+                    dx: d.startOffset.dx + (coords.x - d.startMouse.x),
+                    dy: d.startOffset.dy + (coords.y - d.startMouse.y),
+                };
+                redrawScaleCalCanvas();
+            }
+            return;
+        }
+        // Dragging a track point
+        if (dragTrackPoint.current !== null) {
+            const coords = screenToImageCoords(e);
+            if (coords) {
+                if (dragTrackPoint.current === 'A' && trackPieceA) {
+                    setTrackPieceA({ ...trackPieceA, point: { x: coords.x, y: coords.y }, mode: 'arista', edge: undefined });
+                } else if (dragTrackPoint.current === 'B' && trackPieceB) {
+                    setTrackPieceB({ ...trackPieceB, point: { x: coords.x, y: coords.y }, mode: 'arista', edge: undefined });
+                }
+            }
+            return;
+        }
+        // Dragging a measurement point
+        if (dragPointIdx.current !== null) {
+            const coords = screenToImageCoords(e);
+            if (coords) {
+                setMeasurePoints(prev => {
+                    const updated = [...prev];
+                    updated[dragPointIdx.current!] = { x: coords.x, y: coords.y };
+                    return updated;
+                });
+            }
+            return;
+        }
+        // Panning
+        if (!calDragging.current) return;
+        const canvas = scaleCalCanvasRef.current;
+        const img = scaleCalImageRef.current;
+        if (!canvas || !img) return;
+        const rect = canvas.getBoundingClientRect();
+        const canvasScaleX = img.naturalWidth / rect.width;
+        const canvasScaleY = img.naturalHeight / rect.height;
+        const dx = (e.clientX - calDragging.current.startX) * canvasScaleX;
+        const dy = (e.clientY - calDragging.current.startY) * canvasScaleY;
+        setCalPan({ x: calDragging.current.panX + dx, y: calDragging.current.panY + dy });
+    };
+
+    // Snap point to nearest detection edge
+    const snapToDetectionEdge = (pt: { x: number; y: number }, snapThreshold: number): { point: { x: number; y: number }; edge: 'top' | 'bottom' | 'left' | 'right'; det: any } | null => {
+        const imgEl = scaleCalImageRef.current;
+        if (!imgEl) return null;
+        let best: { point: { x: number; y: number }; edge: 'top' | 'bottom' | 'left' | 'right'; det: any; dist: number } | null = null;
+
+        for (const det of calDetections) {
+            let dx2 = det.x, dy2 = det.y, dw2 = det.width, dh2 = det.height;
+            const isNorm = (dx2 > 0 && dx2 <= 1.1) && (dw2 > 0 && dw2 <= 1.1);
+            if (isNorm) { dx2 *= imgEl.naturalWidth; dy2 *= imgEl.naturalHeight; dw2 *= imgEl.naturalWidth; dh2 *= imgEl.naturalHeight; }
+            const bx = dx2 - dw2 / 2, by2 = dy2 - dh2 / 2;
+
+            // For each edge, find the closest point ON the edge to the given point
+            const edges: Array<{ edge: 'top' | 'bottom' | 'left' | 'right'; closest: { x: number; y: number } }> = [
+                { edge: 'top', closest: { x: Math.max(bx, Math.min(bx + dw2, pt.x)), y: by2 } },
+                { edge: 'bottom', closest: { x: Math.max(bx, Math.min(bx + dw2, pt.x)), y: by2 + dh2 } },
+                { edge: 'left', closest: { x: bx, y: Math.max(by2, Math.min(by2 + dh2, pt.y)) } },
+                { edge: 'right', closest: { x: bx + dw2, y: Math.max(by2, Math.min(by2 + dh2, pt.y)) } },
+            ];
+
+            for (const e of edges) {
+                const d = Math.hypot(e.closest.x - pt.x, e.closest.y - pt.y);
+                if (d < snapThreshold && (!best || d < best.dist)) {
+                    best = { point: e.closest, edge: e.edge, det, dist: d };
+                }
+            }
+        }
+        return best ? { point: best.point, edge: best.edge, det: best.det } : null;
+    };
+
+    const handleCalCanvasMouseUp = () => {
+        // Stop dragging dimension label
+        if (dragDimLabel.current) {
+            dragDimLabel.current = null;
+            return;
+        }
+        // Snap track point to nearest detection edge
+        if (dragTrackPoint.current !== null) {
+            const which = dragTrackPoint.current;
+            const piece = which === 'A' ? trackPieceA : trackPieceB;
+            if (piece) {
+                const snapThreshold = 30 / calZoom;
+                const snap = snapToDetectionEdge(piece.point, snapThreshold);
+                if (snap) {
+                    const updated: TrackPiece = { ...piece, point: snap.point, mode: 'arista', edge: snap.edge, det: snap.det };
+                    if (which === 'A') setTrackPieceA(updated);
+                    else setTrackPieceB(updated);
+                }
+            }
+            dragTrackPoint.current = null;
+            wasDraggingPoint.current = true;
+            return;
+        }
+        if (dragPointIdx.current !== null) {
+            wasDraggingPoint.current = true;
+            dragPointIdx.current = null;
+        }
+        calDragging.current = null;
+    };
+
+    const saveScaleCalibration = async () => {
+        console.log('[CAL SAVE] saveScaleCalibration called', { measurePoints: measurePoints.length, scaleCalRealMm, measureMode });
+        if (measurePoints.length < 2 || !scaleCalRealMm || parseFloat(scaleCalRealMm) <= 0) return;
+        let distPx = 0;
+        if (measureMode === 'punto' && measurePoints.length >= 2) {
+            distPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
+        } else if (measureMode === 'segmentos' && measurePoints.length >= 4) {
+            // Distance between midpoints of the two segments
+            const midAx = (measurePoints[0].x + measurePoints[1].x) / 2;
+            const midAy = (measurePoints[0].y + measurePoints[1].y) / 2;
+            const midBx = (measurePoints[2].x + measurePoints[3].x) / 2;
+            const midBy = (measurePoints[2].y + measurePoints[3].y) / 2;
+            distPx = Math.hypot(midBx - midAx, midBy - midAy);
+        } else {
+            return;
+        }
+        const ratio = parseFloat(scaleCalRealMm) / distPx;
+        setScaleCalMmPerPx(ratio);
+        localStorage.setItem('calibration_mmPerPx', ratio.toString());
+        log('success', `📐 Escala calibrada: ${ratio.toFixed(6)} mm/px (${parseFloat(scaleCalRealMm)} mm = ${distPx.toFixed(1)} px)`);
+
+        // Save canvas image (with drawings) to disk via backend
+        let imageToSave: string | null = null;
+        if (scaleCalCanvasRef.current) {
+            try {
+                imageToSave = scaleCalCanvasRef.current.toDataURL('image/png');
+            } catch (canvasErr) {
+                console.error('[CAL SAVE] canvas.toDataURL failed:', canvasErr);
+            }
+        }
+        if (!imageToSave && scaleCalImageSrc) {
+            imageToSave = scaleCalImageSrc;
+        }
+        const saveDir = calSaveDir || 'C:\\Users\\franj\\OneDrive\\Escritorio\\COSAS  FRAN\\PROYECTOS\\PINTURA\\CALIBRACION';
+        if (!imageToSave) {
+            log('error', 'No hay imagen para guardar');
+            alert('Error: No hay imagen para guardar');
+            return;
+        }
+        try {
+            console.log('[CAL SAVE] Sending to backend, image length:', imageToSave.length, 'dir:', saveDir);
+            const res = await fetch('http://127.0.0.1:8765/api/save-calibration-image', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image: imageToSave,
+                    directory: saveDir,
+                    mmPerPx: ratio,
+                }),
+            });
+            const data = await res.json();
+            console.log('[CAL SAVE] Response:', data);
+            if (data.ok) {
+                log('success', `📁 Imagen guardada: ${data.path}`);
+                alert(`✅ Imagen guardada en:\n${data.path}`);
+            } else {
+                log('error', `Error guardando imagen: ${data.error}`);
+                alert(`❌ Error guardando imagen: ${data.error}`);
+            }
+        } catch (err: any) {
+            console.error('[CAL SAVE] Fetch error:', err);
+            log('error', `Error guardando imagen: ${err.message}`);
+            alert(`❌ Error de conexión: ${err.message}\n\n¿Está camera_server.py corriendo?`);
+        }
+    };
+
+    const clearScaleCalibration = () => {
+        setScaleCalMmPerPx(0);
+        localStorage.removeItem('calibration_mmPerPx');
+        log('info', '📐 Calibración de escala borrada');
+    };
 
     const BACKEND = 'http://127.0.0.1:8765';
 
@@ -922,6 +1795,7 @@ export default function BaslerCamera() {
         { id: 'transport', label: t('tabTL') },
         { id: 'preview', label: t('tabPreview') },
         { id: 'calibration', label: t('tabCal') },
+        { id: 'test', label: '📐 Test' },
     ];
 
     return (
@@ -993,7 +1867,7 @@ export default function BaslerCamera() {
                 ))}
             </div>
 
-            <div className="basler-body">
+            <div className="basler-body" style={activeTab === 'test' ? { padding: '4px 4px 0 4px', gap: 0 } : undefined}>
 
                 {/* ══ TAB: CONEXIÓN ══════════════════════════════════════════════════════ */}
                 {activeTab === 'connection' && (
@@ -1606,12 +2480,12 @@ ${tlConfig.enablePersistentIp ? `
                                                 style={{
                                                     transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)`,
                                                     transformOrigin: 'center center',
-                                                    cursor: measureActive ? 'crosshair' : (segmentActive ? 'cell' : 'grab'),
-                                                    pointerEvents: (measureActive || segmentActive) ? 'auto' : 'none'
+                                                    cursor: measureActive ? 'crosshair' : 'grab',
+                                                    pointerEvents: measureActive ? 'auto' : 'none'
                                                 }}
                                                 onError={() => log('error', 'Error cargando stream MJPEG')}
                                             />
-                                            {(measureActive || segmentContour || segmentDrawPoints.length > 0) && (
+                                            {measureActive && (
                                                 <svg viewBox={`0 0 ${config.width || 1920} ${config.height || 1080}`} preserveAspectRatio="xMidYMid meet" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', transform: `scale(${zoomLevel}) translate(${panOffset.x / zoomLevel}px, ${panOffset.y / zoomLevel}px)` }}>
                                                     {measurePoints.map((p, i) => (
                                                         <circle key={`m-${i}`} cx={p.x} cy={p.y} r={(config.width || 1920) / 500} fill="#0d1117" stroke="#00ff64" strokeWidth={(config.width || 1920) / 700} />
@@ -1621,29 +2495,6 @@ ${tlConfig.enablePersistentIp ? `
                                                     )}
                                                     {measurePoints.length === 1 && measureHover && (
                                                         <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measureHover.x} y2={measureHover.y} stroke="#00ff64" strokeWidth={(config.width || 1920) / 600} strokeDasharray="10,8" opacity={0.7} />
-                                                    )}
-                                                    {segmentContour && (
-                                                        <polygon
-                                                            points={segmentContour.map(p => `${p.x},${p.y}`).join(' ')}
-                                                            fill="rgba(167, 139, 250, 0.25)"
-                                                            stroke="#a78bfa"
-                                                            strokeWidth={(config.width || 1920) / 800}
-                                                        />
-                                                    )}
-
-                                                    {/* Drawing segment shapes */}
-                                                    {segmentDrawPoints.map((p, i) => (
-                                                        <circle key={`s-${i}`} cx={p.x} cy={p.y} r={(config.width || 1920) / 600} fill="#a78bfa" />
-                                                    ))}
-                                                    {segmentActive && segmentTool === 'rect' && segmentDrawPoints.length === 1 && measureHover && (
-                                                        <rect x={Math.min(segmentDrawPoints[0].x, measureHover.x)} y={Math.min(segmentDrawPoints[0].y, measureHover.y)} width={Math.abs(measureHover.x - segmentDrawPoints[0].x)} height={Math.abs(measureHover.y - segmentDrawPoints[0].y)} fill="rgba(167, 139, 250, 0.1)" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
-                                                    )}
-                                                    {segmentActive && segmentTool === 'circle' && segmentDrawPoints.length === 1 && measureHover && (() => {
-                                                        const r = Math.hypot(measureHover.x - segmentDrawPoints[0].x, measureHover.y - segmentDrawPoints[0].y);
-                                                        return <circle cx={segmentDrawPoints[0].x} cy={segmentDrawPoints[0].y} r={r} fill="rgba(167, 139, 250, 0.1)" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
-                                                    })()}
-                                                    {segmentActive && segmentTool === 'polygon' && segmentDrawPoints.length > 0 && measureHover && (
-                                                        <polyline points={[...segmentDrawPoints, measureHover].map(p => `${p.x},${p.y}`).join(' ')} fill="none" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
                                                     )}
                                                 </svg>
                                             )}
@@ -1859,95 +2710,11 @@ ${tlConfig.enablePersistentIp ? `
                                     </div>
                                 )}
 
-                                {/* ── PANEL DE MEDICIÓN ── */}
-                                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, background: measureActive ? '#1f6feb15' : '#0d1117', border: `1px solid ${measureActive ? '#1f6feb50' : '#30363d'}`, padding: '6px 12px', borderRadius: 6 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                                        <button className={`basler-tab-mini ${measureActive ? 'active' : ''}`} style={measureActive ? { borderColor: '#1f6feb', color: '#1f6feb' } : {}} onClick={() => { setMeasureActive(!measureActive); setMeasurePoints([]); setMeasureHover(null); }}>
-                                            📏 {measureActive ? 'Medición Activa (Click 2 ptos)' : 'Medir (OpenCV / Pixel)'}
-                                        </button>
-
-                                        {measurePoints.length === 2 && (() => {
-                                            const distPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
-                                            const realDist = (distPx * measureRatioMmPx).toFixed(2);
-                                            return (
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginLeft: 'auto', fontSize: '0.8rem' }}>
-                                                    <span style={{ color: '#8b949e' }}>{distPx.toFixed(1)} px</span>
-                                                    <strong style={{ color: '#00ff64', fontSize: '0.9rem' }}>⇿ {realDist} mm</strong>
-                                                </div>
-                                            );
-                                        })()}
-                                    </div>
-                                    {measureActive && measurePoints.length === 2 && (
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.75rem', marginTop: 4 }}>
-                                            <span style={{ color: '#8b949e' }}>Ref. Medida (mm):</span>
-                                            <input type="number" step="1" className="basler-input" style={{ width: 70, padding: '2px 4px', fontSize: '0.75rem' }} value={inputMeasureMm} onChange={e => setInputMeasureMm(e.target.value)} />
-
-                                            <button className="basler-tab-mini" style={{ padding: '2px 6px' }} onClick={() => {
-                                                const distPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
-                                                const ref = parseFloat(inputMeasureMm);
-                                                if (distPx > 0 && ref > 0) setMeasureRatioMmPx(ref / distPx);
-                                            }}>Ajustar Escala Manual</button>
-                                        </div>
-                                    )}
-                                </div>
-
-                                {/* ── PANEL DE SEGMENTACIÓN ── */}
-                                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, background: segmentActive ? '#a78bfa15' : '#0d1117', border: `1px solid ${segmentActive ? '#a78bfa50' : '#30363d'}`, padding: '6px 12px', borderRadius: 6 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                                        <button className={`basler-tab-mini ${segmentActive ? 'active' : ''}`} style={segmentActive ? { borderColor: '#a78bfa', color: '#a78bfa' } : {}} onClick={() => { setSegmentActive(!segmentActive); setMeasureActive(false); setSegmentContour(null); setSegmentResult(null); setSegmentDrawPoints([]); }}>
-                                            🧩 Segmentar Objeto
-                                        </button>
-
-                                        {segmentActive && (
-                                            <>
-                                                <select className="basler-input" style={{ width: 140, padding: '2px 4px', fontSize: '0.75rem', borderColor: '#a78bfa50' }} value={segmentTool} onChange={(e) => { setSegmentTool(e.target.value as any); setSegmentDrawPoints([]); setSegmentContour(null); }}>
-                                                    <option value="point">📍 Punto Único</option>
-                                                    <option value="rect">🔲 Rectángulo</option>
-                                                    <option value="circle">⭕ Círculo (Centro-Borde)</option>
-                                                    <option value="polygon">✏️ Polígono</option>
-                                                </select>
-
-                                                {segmentTool === 'point' && (
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.75rem', marginLeft: 'auto' }}>
-                                                        <span style={{ color: '#8b949e' }} title="Tolerancia del detector (1-255). Valores más altos agrupan más colores.">Tolerancia:</span>
-                                                        <input type="number" min="1" max="255" step="1" className="basler-input" style={{ width: 60, padding: '2px 4px', fontSize: '0.75rem' }} value={segmentTolerance} onChange={e => setSegmentTolerance(e.target.value === '' ? '' : (parseInt(e.target.value) || 0))} />
-                                                    </div>
-                                                )}
-
-                                                {segmentTool === 'polygon' && segmentDrawPoints.length >= 3 && (
-                                                    <button className="basler-tab-mini" style={{ marginLeft: 'auto', padding: '2px 8px', fontSize: '0.75rem', borderColor: '#00ff64', color: '#00ff64' }} onClick={() => {
-                                                        runSegmentation('polygon', segmentDrawPoints);
-                                                        setSegmentDrawPoints([]);
-                                                    }}>Aplicar Polígono</button>
-                                                )}
-
-                                                {segmentDrawPoints.length > 0 && segmentTool !== 'polygon' && (
-                                                    <span style={{ fontSize: '0.75rem', color: '#8b949e', fontStyle: 'italic', marginLeft: 'auto' }}>
-                                                        {segmentDrawPoints.length === 1 ? 'Haz clic para cerrar la forma' : ''}
-                                                    </span>
-                                                )}
-                                            </>
-                                        )}
-                                    </div>
-
-                                    {segmentResult && (() => {
-                                        const areaMm2 = segmentResult.area_px * (measureRatioMmPx * measureRatioMmPx);
-                                        return (
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4, fontSize: '0.8rem', background: '#a78bfa20', padding: '4px 8px', borderRadius: 4 }}>
-                                                <span style={{ color: '#c4b5fd' }}>Área: {segmentResult.area_px.toLocaleString()} px²</span>
-                                                {measureRatioMmPx !== 1 && (
-                                                    <strong style={{ color: '#a78bfa', fontSize: '0.85rem' }}>≈ {areaMm2.toFixed(1)} mm²</strong>
-                                                )}
-                                                <button className="basler-tab-mini" style={{ marginLeft: 'auto', padding: '2px 6px', fontSize: '0.7rem', borderColor: '#a78bfa50', color: '#c4b5fd' }} onClick={() => { setSegmentContour(null); setSegmentResult(null); }}>Limpiar</button>
-                                            </div>
-                                        );
-                                    })()}
-                                </div>
 
 
-                                {/* Stream MJPEG â€” idÃ©ntico al del Preview tab */}
-                                <div className="stream-zoom-wrap" style={{ cursor: 'default', minHeight: 340 }}>
-                                    {backendOk ? (
+                                {/* Stream MJPEG – idéntico al del Preview tab */}
+                                <div className="stream-zoom-wrap" style={{ cursor: 'default', minHeight: 340, position: 'relative' }}>
+                                    {backendOk && isConnected ? (
                                         <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                                             <img
                                                 key={streamKey}
@@ -1955,10 +2722,10 @@ ${tlConfig.enablePersistentIp ? `
                                                 alt="Calibration MJPEG Stream" onClick={handleStreamClick} onMouseMove={handleStreamMove} onMouseLeave={handleStreamLeave}
                                                 className="stream-zoom-img"
                                                 draggable={false}
-                                                style={{ transform: 'none', objectFit: 'contain', cursor: measureActive ? 'crosshair' : (segmentActive ? 'cell' : 'default'), pointerEvents: (measureActive || segmentActive) ? 'auto' : 'none' }}
-                                                onError={() => log('error', 'Error cargando stream (calibraciÃ³n)')}
+                                                style={{ transform: 'none', objectFit: 'contain', cursor: measureActive ? 'crosshair' : 'default', pointerEvents: measureActive ? 'auto' : 'none' }}
+                                                onError={() => log('error', 'Error cargando stream (calibración)')}
                                             />
-                                            {(measureActive || segmentContour || segmentDrawPoints.length > 0) && (
+                                            {measureActive && (
                                                 <svg viewBox={`0 0 ${config.width || 1920} ${config.height || 1080}`} preserveAspectRatio="xMidYMid meet" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
                                                     {measurePoints.map((p, i) => (
                                                         <circle key={`m2-${i}`} cx={p.x} cy={p.y} r={(config.width || 1920) / 500} fill="#0d1117" stroke="#00ff64" strokeWidth={(config.width || 1920) / 700} />
@@ -1969,42 +2736,86 @@ ${tlConfig.enablePersistentIp ? `
                                                     {measurePoints.length === 1 && measureHover && (
                                                         <line x1={measurePoints[0].x} y1={measurePoints[0].y} x2={measureHover.x} y2={measureHover.y} stroke="#00ff64" strokeWidth={(config.width || 1920) / 600} strokeDasharray="10,8" opacity={0.7} />
                                                     )}
-                                                    {segmentContour && (
-                                                        <polygon
-                                                            points={segmentContour.map(p => `${p.x},${p.y}`).join(' ')}
-                                                            fill="rgba(167, 139, 250, 0.25)"
-                                                            stroke="#a78bfa"
-                                                            strokeWidth={(config.width || 1920) / 800}
-                                                        />
-                                                    )}
-                                                    {/* Drawing segment shapes in second stream */}
-                                                    {segmentDrawPoints.map((p, i) => (
-                                                        <circle key={`s2-${i}`} cx={p.x} cy={p.y} r={(config.width || 1920) / 600} fill="#a78bfa" />
-                                                    ))}
-                                                    {segmentActive && segmentTool === 'rect' && segmentDrawPoints.length === 1 && measureHover && (
-                                                        <rect x={Math.min(segmentDrawPoints[0].x, measureHover.x)} y={Math.min(segmentDrawPoints[0].y, measureHover.y)} width={Math.abs(measureHover.x - segmentDrawPoints[0].x)} height={Math.abs(measureHover.y - segmentDrawPoints[0].y)} fill="rgba(167, 139, 250, 0.1)" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
-                                                    )}
-                                                    {segmentActive && segmentTool === 'circle' && segmentDrawPoints.length === 1 && measureHover && (() => {
-                                                        const r = Math.hypot(measureHover.x - segmentDrawPoints[0].x, measureHover.y - segmentDrawPoints[0].y);
-                                                        return <circle cx={segmentDrawPoints[0].x} cy={segmentDrawPoints[0].y} r={r} fill="rgba(167, 139, 250, 0.1)" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
-                                                    })()}
-                                                    {segmentActive && segmentTool === 'polygon' && segmentDrawPoints.length > 0 && measureHover && (
-                                                        <polyline points={[...segmentDrawPoints, measureHover].map(p => `${p.x},${p.y}`).join(' ')} fill="none" stroke="#a78bfa" strokeWidth={(config.width || 1920) / 800} strokeDasharray="10,8" />
-                                                    )}
                                                 </svg>
                                             )}
                                         </div>
                                     ) : (
-                                        <canvas
-                                            ref={canvasRef} width={640} height={400}
-                                            className="stream-zoom-img"
-                                            style={{ transform: 'none' }}
-                                        />
+                                        scaleCalImageSrc ? (
+                                            <div style={{ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                                                <canvas
+                                                    ref={scaleCalCanvasRef}
+                                                    onClick={handleScaleCalCanvasClick}
+                                                    onWheel={handleCalCanvasWheel}
+                                                    onMouseDown={handleCalCanvasMouseDown}
+                                                    onMouseMove={handleCalCanvasMouseMove}
+                                                    onMouseUp={handleCalCanvasMouseUp}
+                                                    onMouseLeave={handleCalCanvasMouseUp}
+                                                    onContextMenu={e => e.preventDefault()}
+                                                    style={{
+                                                        display: 'block', width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'auto',
+                                                        cursor: measureActive ? 'crosshair' : calPanMode ? (calDragging.current ? 'grabbing' : 'grab') : calZoomMode ? 'zoom-in' : 'default',
+                                                    }}
+                                                />
+                                            </div>
+                                        ) : (
+                                            <label style={{
+                                                display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                                                width: '100%', minHeight: 400, cursor: 'pointer',
+                                                background: '#0d1117', border: '2px dashed #30363d', borderRadius: 10,
+                                                color: '#8b949e', gap: 12, transition: 'border-color 0.2s, background 0.2s',
+                                            }}
+                                                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = '#a78bfa'; (e.currentTarget as HTMLElement).style.background = '#0d111799'; }}
+                                                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = '#30363d'; (e.currentTarget as HTMLElement).style.background = '#0d1117'; }}
+                                            >
+                                                <span style={{ fontSize: '3rem' }}>📷</span>
+                                                <span style={{ fontSize: '1rem', fontWeight: 600, color: '#c4b5fd' }}>Subir Imagen de Referencia</span>
+                                                <span style={{ fontSize: '0.78rem', color: '#484f58', maxWidth: 280, textAlign: 'center' }}>
+                                                    Sube una imagen con una medida conocida para calibrar la escala mm/px
+                                                </span>
+                                                <input type="file" accept="image/*" onChange={handleScaleCalImageUpload} style={{ display: 'none' }} />
+                                            </label>
+                                        )
+                                    )}
+
+
+                                    {/* Zoom and Pan toggle buttons */}
+                                    {(scaleCalImageSrc || (backendOk && isConnected)) && (
+                                        <div style={{ position: 'absolute', bottom: 10, left: 10, zIndex: 5, display: 'flex', gap: 4 }}>
+                                            <button
+                                                style={{
+                                                    padding: '5px 12px', fontSize: '0.72rem', fontWeight: 600,
+                                                    border: `1px solid ${calZoomMode ? '#1f6feb' : '#30363d'}`,
+                                                    borderRadius: 5, cursor: 'pointer',
+                                                    background: calZoomMode ? '#1f6feb25' : 'rgba(0,0,0,0.75)',
+                                                    color: calZoomMode ? '#1f6feb' : '#8b949e',
+                                                    backdropFilter: 'blur(4px)',
+                                                }}
+                                                onClick={() => { setCalZoomMode(z => !z); setCalPanMode(false); }}
+                                            >🔍 Zoom</button>
+                                            <button
+                                                style={{
+                                                    padding: '5px 12px', fontSize: '0.72rem', fontWeight: 600,
+                                                    border: `1px solid ${calPanMode ? '#ff6b35' : '#30363d'}`,
+                                                    borderRadius: 5, cursor: 'pointer',
+                                                    background: calPanMode ? '#ff6b3525' : 'rgba(0,0,0,0.75)',
+                                                    color: calPanMode ? '#ff6b35' : '#8b949e',
+                                                    backdropFilter: 'blur(4px)',
+                                                }}
+                                                onClick={() => { setCalPanMode(p => !p); setCalZoomMode(false); }}
+                                            >✋ Mover</button>
+                                            {calZoom !== 1 && (
+                                                <>
+                                                    <span style={{ padding: '5px 4px', fontSize: '0.7rem', fontFamily: 'monospace', color: '#1f6feb' }}>{(calZoom * 100).toFixed(0)}%</span>
+                                                    <button style={{ background: 'none', border: '1px solid #30363d', borderRadius: 5, color: '#ff6b35', cursor: 'pointer', fontSize: '0.65rem', padding: '4px 8px' }}
+                                                        onClick={() => { setCalZoom(1); setCalPan({ x: 0, y: 0 }); }}>⟲ Reset</button>
+                                                </>
+                                            )}
+                                        </div>
                                     )}
 
                                     {/* Overlay: parÃ¡metros tablero */}
                                     <div style={{
-                                        position: 'absolute', bottom: 10, left: 10,
+                                        position: 'absolute', bottom: 44, left: 10,
                                         background: 'rgba(0,0,0,0.72)', backdropFilter: 'blur(4px)',
                                         border: '1px solid #a78bfa50', borderRadius: 6,
                                         padding: '4px 10px', fontSize: '0.72rem', fontFamily: 'monospace',
@@ -2026,6 +2837,7 @@ ${tlConfig.enablePersistentIp ? `
                                         </div>
                                     )}
                                 </div>
+
 
                                 {/* Chips de mÃ©tricas */}
                                 <div className="preview-metrics">
@@ -2251,109 +3063,362 @@ undistorted   = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_mtx)`
                             {/* â”€â”€ Panel derecho: config + captura + lista â”€â”€â”€â”€â”€â”€â”€â”€ */}
                             <div className="capture-panel">
 
-                                <div className="capture-panel-title">{String.fromCodePoint(0x1F4D0)} {t('calTitle')}</div>
-
-                                <div style={{ fontSize: '0.72rem', color: '#8b949e', lineHeight: 1.5 }}>
-                                    {t('calDesc')}
+                                {/* ── MEDICIÓN PARA CALIBRAR ── */}
+                                <div
+                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none', marginBottom: 6 }}
+                                    onClick={() => setCalMeasureCollapsed(v => !v)}
+                                >
+                                    <div className="capture-panel-title" style={{ margin: 0 }}>📏 Medición / Calibración Pixel</div>
+                                    <span style={{ fontSize: '1rem', color: '#8b949e', transition: 'transform 0.2s', transform: calMeasureCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}>▶</span>
                                 </div>
 
-                                {/* Checkerboard config */}
-                                <div className="capture-field">
-                                    <label>{String.fromCodePoint(0x1F532)} {t('calBoard')}</label>
-                                </div>
-
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                                    <div className="capture-field">
-                                        <label>{t('calCols')}: <strong style={{ color: '#a78bfa' }}>{calCols}</strong></label>
-                                        <input className="basler-input capture-input" type="number" min={3} max={20}
-                                            value={calCols} onChange={e => setCalCols(Number(e.target.value))} />
-                                        <span className="basler-hint">{t('calColsHint')}</span>
-                                    </div>
-                                    <div className="capture-field">
-                                        <label>{t('calRows')}: <strong style={{ color: '#a78bfa' }}>{calRows}</strong></label>
-                                        <input className="basler-input capture-input" type="number" min={3} max={20}
-                                            value={calRows} onChange={e => setCalRows(Number(e.target.value))} />
-                                        <span className="basler-hint">{t('calRowsHint')}</span>
-                                    </div>
-                                </div>
-
-                                <div className="capture-field">
-                                    <label>{t('calSquare')}: <strong style={{ color: '#a78bfa' }}>{calSquare} mm</strong></label>
-                                    <input type="range" className="basler-slider" min={5} max={100} step={0.5}
-                                        value={calSquare} onChange={e => setCalSquare(Number(e.target.value))} />
-                                    <div className="slider-labels"><span>5 mm</span><span>100 mm</span></div>
-                                </div>
-
-                                <div className="capture-divider" />
-
-                                {/* Directorio */}
-                                <div className="capture-field">
-                                    <label>{String.fromCodePoint(0x1F4C1)} {t('calDir')}</label>
-                                    <input className="basler-input capture-input" spellCheck={false}
-                                        value={calSaveDir} onChange={e => setCalSaveDir(e.target.value)} />
-                                    <span className="basler-hint">{t('calDirHint')}</span>
-                                </div>
-
-                                {/* Botones de acciÃ³n */}
-                                <button
-                                    className={`basler-btn capture-btn ${calCapturing ? 'loading' : ''}`}
-                                    onClick={handleCalCapture}
-                                    disabled={calCapturing || !isConnected || !backendOk}>
-                                    {calCapturing
-                                        ? <><span className="spin">{'\u21BB'}</span> {t('calCapturing')}</>
-                                        : `${String.fromCodePoint(0x1F4F8)} ${t('calCapture')}`}
-                                </button>
-
-                                <button
-                                    className={`basler-btn connect ${calComputing ? 'loading' : ''}`}
-                                    onClick={handleCalCompute}
-                                    disabled={calComputing || calImages.filter(i => i.corners).length < 4}>
-                                    {calComputing
-                                        ? <><span className="spin">{'\u21BB'}</span> {t('calComputing')}</>
-                                        : `${String.fromCodePoint(0x1F3AF)} ${t('calCompute')}`}
-                                </button>
-
-                                {!backendOk && (
-                                    <div className="capture-result err">{'\u26A0'} {t('needServer')}</div>
-                                )}
-                                {!isConnected && backendOk && (
-                                    <div className="capture-result err">{'\u26A0'} {t('calNeedCam')}</div>
-                                )}
-                                {calMsg && (
-                                    <div className={`capture-result ${calMsg.ok ? 'ok' : 'err'}`}>{calMsg.text}</div>
-                                )}
-
-                                <div className="capture-divider" />
-
-                                {/* Lista de imÃ¡genes */}
-                                <div className="capture-gallery-title" style={{ display: 'flex', alignItems: 'center' }}>
-                                    <span>
-                                        {String.fromCodePoint(0x1F4C2)} {t('calImages')} ({calImages.length})
-                                        {' \u00B7 '}{'\u2714'} {calImages.filter(i => i.corners).length} {t('calValid')}
-                                    </span>
-                                    {calImages.length > 0 && (
-                                        <button className="basler-tab-mini" style={{ marginLeft: 'auto' }} onClick={handleCalClear}>
-                                            {String.fromCodePoint(0x1F5D1)}
-                                        </button>
-                                    )}
-                                </div>
-
-                                {calImages.length === 0 ? (
-                                    <div style={{ fontSize: '0.75rem', color: '#484f58', fontFamily: 'monospace' }}>
-                                        &mdash; {t('calNoResult')} &mdash;
-                                    </div>
-                                ) : (
-                                    <div className="cal-images-list">
-                                        {calImages.map((img, i) => (
-                                            <div key={i} className={`cal-image-item ${img.corners ? 'ok' : 'warn'}`}>
-                                                <span style={{ fontSize: '0.82rem' }}>
-                                                    {img.corners ? '\u2714' : '\u26A0'} {img.filename}
-                                                </span>
-                                                <span style={{ fontSize: '0.7rem', color: '#8b949e', flexShrink: 0 }}>{img.time}</span>
+                                {!calMeasureCollapsed && (<>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, background: measureActive ? '#1f6feb15' : '#0d1117', border: `1px solid ${measureActive ? '#1f6feb50' : '#30363d'}`, padding: '6px 12px', borderRadius: 6, marginBottom: 8 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                            <button className={`basler-tab-mini ${measureActive ? 'active' : ''}`} style={measureActive ? { borderColor: '#1f6feb', color: '#1f6feb' } : {}} onClick={() => { setMeasureActive(!measureActive); setMeasurePoints([]); setMeasureHover(null); }}>
+                                                📏 {measureActive ? 'Medición Activa' : 'Medir'}
+                                            </button>
+                                            {measureActive && (
+                                                <div style={{ display: 'flex', gap: 0, border: '1px solid #30363d', borderRadius: 4, overflow: 'hidden' }}>
+                                                    <button style={{ padding: '3px 10px', fontSize: '0.7rem', fontWeight: 600, border: 'none', cursor: 'pointer', background: measureMode === 'punto' ? '#1f6feb' : '#161b22', color: measureMode === 'punto' ? '#fff' : '#8b949e' }}
+                                                        onClick={() => { setMeasureMode('punto'); setMeasurePoints([]); }}>● Punto</button>
+                                                    <button style={{ padding: '3px 10px', fontSize: '0.7rem', fontWeight: 600, border: 'none', borderLeft: '1px solid #30363d', cursor: 'pointer', background: measureMode === 'segmentos' ? '#1f6feb' : '#161b22', color: measureMode === 'segmentos' ? '#fff' : '#8b949e' }}
+                                                        onClick={() => { setMeasureMode('segmentos'); setMeasurePoints([]); }}>⊿ Segmentos</button>
+                                                </div>
+                                            )}
+                                            {measureActive && (
+                                                <button style={{ padding: '3px 10px', fontSize: '0.7rem', fontWeight: 600, border: `1px solid ${showLabels ? '#00ff6450' : '#30363d'}`, borderRadius: 4, cursor: 'pointer', background: showLabels ? '#00ff6418' : '#161b22', color: showLabels ? '#00ff64' : '#8b949e' }}
+                                                    onClick={() => setShowLabels(v => !v)}>
+                                                    {showLabels ? '👁 Etiquetas' : '👁‍🗨 Etiquetas'}
+                                                </button>
+                                            )}
+                                            {(() => {
+                                                if (measureMode === 'punto' && measurePoints.length === 2) {
+                                                    const dPx = Math.hypot(measurePoints[1].x - measurePoints[0].x, measurePoints[1].y - measurePoints[0].y);
+                                                    const mmVal = scaleCalMmPerPx > 0 ? dPx * scaleCalMmPerPx : 0;
+                                                    return (<div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
+                                                        <span style={{ fontSize: '0.82rem', color: '#1f6feb', fontWeight: 700 }}>⇿ {dPx.toFixed(1)} px</span>
+                                                        {mmVal > 0 && <span style={{ fontSize: '0.82rem', color: '#00ff64', fontWeight: 700 }}>{mmVal.toFixed(2)} mm</span>}
+                                                    </div>);
+                                                }
+                                                if (measureMode === 'segmentos' && measurePoints.length >= 4) {
+                                                    const midAx = (measurePoints[0].x + measurePoints[1].x) / 2, midAy = (measurePoints[0].y + measurePoints[1].y) / 2;
+                                                    const midBx = (measurePoints[2].x + measurePoints[3].x) / 2, midBy = (measurePoints[2].y + measurePoints[3].y) / 2;
+                                                    const dPx = Math.hypot(midBx - midAx, midBy - midAy);
+                                                    const mmVal = scaleCalMmPerPx > 0 ? dPx * scaleCalMmPerPx : 0;
+                                                    return (<div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
+                                                        <span style={{ fontSize: '0.82rem', color: '#00ff64', fontWeight: 700 }}>↔ {dPx.toFixed(1)} px</span>
+                                                        {mmVal > 0 && <span style={{ fontSize: '0.82rem', color: '#00ff64', fontWeight: 700 }}>{mmVal.toFixed(2)} mm</span>}
+                                                    </div>);
+                                                }
+                                                if (measureActive && measureMode === 'segmentos' && measurePoints.length < 4 && measurePoints.length > 0) {
+                                                    return <span style={{ fontSize: '0.7rem', color: '#8b949e', marginLeft: 'auto' }}>{measurePoints.length <= 2 ? `Seg A: ${measurePoints.length}/2` : `Seg B: ${measurePoints.length - 2}/2`}</span>;
+                                                }
+                                                return null;
+                                            })()}
+                                            {measureActive && measurePoints.length > 0 && (
+                                                <button className="basler-tab-mini" style={{ fontSize: '0.65rem', borderColor: '#ff444450', color: '#ff4444', padding: '2px 6px' }}
+                                                    onClick={() => setMeasurePoints([])}>↺ Reset</button>
+                                            )}
+                                        </div>
+                                        {measureActive && ((measureMode === 'punto' && measurePoints.length >= 2) || (measureMode === 'segmentos' && measurePoints.length >= 4)) && (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4, background: '#0d111780', borderRadius: 6, padding: '8px 10px', border: '1px solid #1f6feb30' }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                    <span style={{ fontSize: '0.78rem', color: '#ccc', whiteSpace: 'nowrap' }}>Distancia real:</span>
+                                                    <input type="number" step="0.1" min="0.1" className="basler-input" style={{ width: 90, padding: '4px 6px', fontSize: '0.85rem' }}
+                                                        value={scaleCalRealMm} onChange={e => setScaleCalRealMm(e.target.value)} placeholder="mm" />
+                                                    <span style={{ fontSize: '0.78rem', color: '#8b949e' }}>mm</span>
+                                                </div>
+                                                <button className="basler-btn connect" style={{ padding: '8px', fontSize: '0.82rem' }}
+                                                    onClick={saveScaleCalibration} disabled={!scaleCalRealMm || parseFloat(scaleCalRealMm) <= 0}>
+                                                    💾 Guardar Calibración
+                                                </button>
                                             </div>
-                                        ))}
+                                        )}
+                                        {scaleCalMmPerPx > 0 && (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.75rem', background: '#00ff6410', border: '1px solid #00ff6430', borderRadius: 4, padding: '4px 8px', marginTop: 2 }}>
+                                                <span style={{ color: '#00ff64', fontWeight: 700 }}>✓ {scaleCalMmPerPx.toFixed(4)} mm/px</span>
+                                                <button className="basler-tab-mini" style={{ marginLeft: 'auto', fontSize: '0.65rem', borderColor: '#ff444450', color: '#ff4444' }} onClick={clearScaleCalibration}>Borrar</button>
+                                            </div>
+                                        )}
                                     </div>
-                                )}
+
+                                </>)}
+
+                                <div className="capture-divider" />
+
+                                {/* ── ANALIZAR IMAGEN (Roboflow) ── */}
+                                <div
+                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none' }}
+                                    onClick={() => setCalAnalyzeCollapsed(v => !v)}
+                                >
+                                    <div className="capture-panel-title" style={{ margin: 0 }}>🔬 Analizar Imagen (Roboflow)</div>
+                                    <span style={{ fontSize: '1rem', color: '#8b949e', transition: 'transform 0.2s', transform: calAnalyzeCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}>▶</span>
+                                </div>
+
+                                {!calAnalyzeCollapsed && (<>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, background: '#BD00FF08', border: '1px solid #BD00FF30', padding: '8px 12px', borderRadius: 6, marginTop: 6 }}>
+                                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                            <button
+                                                className={`basler-btn ${calAnalyzing ? 'loading' : ''}`}
+                                                style={{ padding: '6px 12px', fontSize: '0.78rem', background: '#BD00FF', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', flex: 1 }}
+                                                onClick={analyzeCalImage}
+                                                disabled={!scaleCalImageSrc || calAnalyzing}
+                                            >
+                                                {calAnalyzing ? <><span className="spin">↻</span> Analizando...</> : '🔬 ANALIZAR IMAGEN'}
+                                            </button>
+                                            <button
+                                                style={{
+                                                    padding: '6px 10px', fontSize: '0.7rem', fontWeight: 600,
+                                                    border: `1px solid ${calShowDetectionLabels ? '#BD00FF50' : '#30363d'}`,
+                                                    borderRadius: 4, cursor: 'pointer',
+                                                    background: calShowDetectionLabels ? '#BD00FF18' : '#161b22',
+                                                    color: calShowDetectionLabels ? '#BD00FF' : '#8b949e',
+                                                }}
+                                                onClick={() => setCalShowDetectionLabels(v => !v)}
+                                            >
+                                                {calShowDetectionLabels ? '👁 Rótulos' : '👁‍🗨 Rótulos'}
+                                            </button>
+                                        </div>
+                                        {calDetections.length > 0 && (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.72rem', color: '#BD00FF', marginTop: 2 }}>
+                                                <span>🔬 {calDetections.length} detecciones</span>
+                                                <button className="basler-tab-mini" style={{ fontSize: '0.6rem', borderColor: '#ff444450', color: '#ff4444', marginLeft: 'auto' }}
+                                                    onClick={() => setCalDetections([])}>Limpiar</button>
+                                            </div>
+                                        )}
+                                        {!scaleCalImageSrc && (
+                                            <div style={{ fontSize: '0.72rem', color: '#8b949e' }}>⚠ Sube una imagen primero para analizarla</div>
+                                        )}
+
+                                        <div className="capture-divider" style={{ margin: '6px 0' }} />
+
+                                        {/* DEFINIR TRACK */}
+                                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                                            <button
+                                                style={{
+                                                    padding: '6px 12px', fontSize: '0.75rem', fontWeight: 700,
+                                                    border: `2px solid ${trackMode ? '#FFFF00' : '#30363d'}`,
+                                                    borderRadius: 4, cursor: 'pointer',
+                                                    background: trackMode ? '#FFFF0018' : '#161b22',
+                                                    color: trackMode ? '#FFFF00' : '#8b949e',
+                                                }}
+                                                onClick={() => { setTrackMode(m => !m); setTrackPieceA(null); setTrackPieceB(null); }}
+                                                disabled={calDetections.length === 0}
+                                            >
+                                                🎯 {trackMode ? 'SELECCIONANDO...' : 'DEFINIR TRACK'}
+                                            </button>
+                                            {trackMode && (
+                                                <span style={{ fontSize: '0.68rem', color: '#FFFF00' }}>
+                                                    {!trackPieceA ? 'Pulsa pieza A' : !trackPieceB ? 'Pulsa pieza B' : '✔ Track definido'}
+                                                </span>
+                                            )}
+                                        </div>
+
+                                        {/* Centro / Arista toggle */}
+                                        {trackMode && (
+                                            <div style={{ display: 'flex', gap: 0, border: '1px solid #30363d', borderRadius: 4, overflow: 'hidden', marginTop: 4 }}>
+                                                <button style={{
+                                                    padding: '4px 12px', fontSize: '0.7rem', fontWeight: 600, border: 'none', cursor: 'pointer',
+                                                    background: trackPointMode === 'centro' ? '#1f6feb' : '#161b22',
+                                                    color: trackPointMode === 'centro' ? '#fff' : '#8b949e',
+                                                }} onClick={() => setTrackPointMode('centro')}>◎ Centro</button>
+                                                <button style={{
+                                                    padding: '4px 12px', fontSize: '0.7rem', fontWeight: 600, border: 'none', cursor: 'pointer',
+                                                    background: trackPointMode === 'arista' ? '#1f6feb' : '#161b22',
+                                                    color: trackPointMode === 'arista' ? '#fff' : '#8b949e',
+                                                }} onClick={() => setTrackPointMode('arista')}>| Arista</button>
+                                            </div>
+                                        )}
+
+                                        {/* Track status */}
+                                        {trackPieceA && (
+                                            <div style={{ fontSize: '0.72rem', color: '#ccc', background: '#0d111780', borderRadius: 4, padding: '4px 8px', marginTop: 2 }}>
+                                                <div style={{ color: '#00FFFF' }}>● A: {trackPieceA.det.class || 'Obj'} ({(trackPieceA.det.confidence * 100).toFixed(0)}%) — {trackPieceA.mode}{trackPieceA.edge ? ` (${trackPieceA.edge})` : ''}</div>
+                                                {trackPieceB && (
+                                                    <div style={{ color: '#FF00FF' }}>● B: {trackPieceB.det.class || 'Obj'} ({(trackPieceB.det.confidence * 100).toFixed(0)}%) — {trackPieceB.mode}{trackPieceB.edge ? ` (${trackPieceB.edge})` : ''}</div>
+                                                )}
+                                                {trackPieceA && trackPieceB && (() => {
+                                                    const dxP = Math.abs(trackPieceB.point.x - trackPieceA.point.x);
+                                                    const dyP = Math.abs(trackPieceB.point.y - trackPieceA.point.y);
+                                                    const dp = Math.hypot(dxP, dyP);
+                                                    const dxM = scaleCalMmPerPx > 0 ? dxP * scaleCalMmPerPx : 0;
+                                                    const dyM = scaleCalMmPerPx > 0 ? dyP * scaleCalMmPerPx : 0;
+                                                    const dm = scaleCalMmPerPx > 0 ? dp * scaleCalMmPerPx : 0;
+                                                    return <>
+                                                        <div style={{ color: '#FF6600', marginTop: 2 }}>X: {dxP.toFixed(1)} px{dxM > 0 ? ` = ${dxM.toFixed(2)} mm` : ''}</div>
+                                                        <div style={{ color: '#00FF66' }}>Y: {dyP.toFixed(1)} px{dyM > 0 ? ` = ${dyM.toFixed(2)} mm` : ''}</div>
+                                                        <div style={{ color: '#FFFF00', fontWeight: 700 }}>↔ {dp.toFixed(1)} px{dm > 0 ? ` = ${dm.toFixed(2)} mm` : ''}</div>
+                                                    </>;
+                                                })()}
+                                            </div>
+                                        )}
+
+                                        {/* Guardar Track + Mover Cotas */}
+                                        {trackPieceA && trackPieceB && (
+                                            <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                                                <button
+                                                    className="basler-btn connect"
+                                                    style={{ padding: '8px', fontSize: '0.78rem', flex: 1 }}
+                                                    onClick={saveTrackSpecification}
+                                                >
+                                                    💾 Guardar Track
+                                                </button>
+                                                <button
+                                                    style={{
+                                                        padding: '6px 10px', fontSize: '0.7rem', fontWeight: 600, borderRadius: 4, cursor: 'pointer',
+                                                        border: `2px solid ${moveDimLabels ? '#FF6600' : '#30363d'}`,
+                                                        background: moveDimLabels ? '#FF660018' : '#161b22',
+                                                        color: moveDimLabels ? '#FF6600' : '#8b949e',
+                                                    }}
+                                                    onClick={() => setMoveDimLabels(v => !v)}
+                                                >
+                                                    📌 {moveDimLabels ? 'MOVIENDO COTAS' : 'Mover Cotas'}
+                                                </button>
+                                                {moveDimLabels && (
+                                                    <button
+                                                        style={{
+                                                            padding: '4px 8px', fontSize: '0.62rem', fontWeight: 600, borderRadius: 4, cursor: 'pointer',
+                                                            border: '1px solid #30363d', background: '#161b22', color: '#8b949e',
+                                                        }}
+                                                        onClick={() => {
+                                                            dimLabelOffsets.current = { x: { dx: 0, dy: 0 }, y: { dx: 0, dy: 0 }, total: { dx: 0, dy: 0 } };
+                                                            redrawScaleCalCanvas();
+                                                        }}
+                                                    >
+                                                        ↺ Reset
+                                                    </button>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Track spec guardado */}
+                                        {trackSpec && (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.7rem', background: '#FFFF0010', border: '1px solid #FFFF0030', borderRadius: 4, padding: '4px 8px', marginTop: 2 }}>
+                                                <span style={{ color: '#FFFF00' }}>✓ Track: {trackSpec.classA} ↔ {trackSpec.classB} ({trackSpec.distanceMm.toFixed(2)} mm)</span>
+                                                <button className="basler-tab-mini" style={{ marginLeft: 'auto', fontSize: '0.6rem', borderColor: '#ff444450', color: '#ff4444' }}
+                                                    onClick={() => { setTrackSpec(null); localStorage.removeItem('trackSpec'); }}>Borrar</button>
+                                            </div>
+                                        )}
+                                    </div>
+                                </>)}
+
+                                <div className="capture-divider" />
+
+                                {/* ── TABLERO DE AJEDREZ ── */}
+                                <div
+                                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none' }}
+                                    onClick={() => setCalBoardCollapsed(v => !v)}
+                                >
+                                    <div className="capture-panel-title" style={{ margin: 0 }}>{String.fromCodePoint(0x1F4D0)} {t('calTitle')}</div>
+                                    <span style={{ fontSize: '1rem', color: '#8b949e', transition: 'transform 0.2s', transform: calBoardCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}>▶</span>
+                                </div>
+
+                                {!calBoardCollapsed && (<>
+                                    <div style={{ fontSize: '0.72rem', color: '#8b949e', lineHeight: 1.5 }}>
+                                        {t('calDesc')}
+                                    </div>
+
+                                    {/* Checkerboard config */}
+                                    <div className="capture-field">
+                                        <label>{String.fromCodePoint(0x1F532)} {t('calBoard')}</label>
+                                    </div>
+
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                                        <div className="capture-field">
+                                            <label>{t('calCols')}: <strong style={{ color: '#a78bfa' }}>{calCols}</strong></label>
+                                            <input className="basler-input capture-input" type="number" min={3} max={20}
+                                                value={calCols} onChange={e => setCalCols(Number(e.target.value))} />
+                                            <span className="basler-hint">{t('calColsHint')}</span>
+                                        </div>
+                                        <div className="capture-field">
+                                            <label>{t('calRows')}: <strong style={{ color: '#a78bfa' }}>{calRows}</strong></label>
+                                            <input className="basler-input capture-input" type="number" min={3} max={20}
+                                                value={calRows} onChange={e => setCalRows(Number(e.target.value))} />
+                                            <span className="basler-hint">{t('calRowsHint')}</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="capture-field">
+                                        <label>{t('calSquare')}: <strong style={{ color: '#a78bfa' }}>{calSquare} mm</strong></label>
+                                        <input type="range" className="basler-slider" min={5} max={100} step={0.5}
+                                            value={calSquare} onChange={e => setCalSquare(Number(e.target.value))} />
+                                        <div className="slider-labels"><span>5 mm</span><span>100 mm</span></div>
+                                    </div>
+
+                                    <div className="capture-divider" />
+
+                                    {/* Directorio */}
+                                    <div className="capture-field">
+                                        <label>{String.fromCodePoint(0x1F4C1)} {t('calDir')}</label>
+                                        <input className="basler-input capture-input" spellCheck={false}
+                                            value={calSaveDir} onChange={e => setCalSaveDir(e.target.value)} />
+                                        <span className="basler-hint">{t('calDirHint')}</span>
+                                    </div>
+
+                                    {/* Botones de acciÃ³n */}
+                                    <button
+                                        className={`basler-btn capture-btn ${calCapturing ? 'loading' : ''}`}
+                                        onClick={handleCalCapture}
+                                        disabled={calCapturing || !isConnected || !backendOk}>
+                                        {calCapturing
+                                            ? <><span className="spin">{'\u21BB'}</span> {t('calCapturing')}</>
+                                            : `${String.fromCodePoint(0x1F4F8)} ${t('calCapture')}`}
+                                    </button>
+
+                                    <button
+                                        className={`basler-btn connect ${calComputing ? 'loading' : ''}`}
+                                        onClick={handleCalCompute}
+                                        disabled={calComputing || calImages.filter(i => i.corners).length < 4}>
+                                        {calComputing
+                                            ? <><span className="spin">{'\u21BB'}</span> {t('calComputing')}</>
+                                            : `${String.fromCodePoint(0x1F3AF)} ${t('calCompute')}`}
+                                    </button>
+
+                                    {!backendOk && (
+                                        <div className="capture-result err">{'\u26A0'} {t('needServer')}</div>
+                                    )}
+                                    {!isConnected && backendOk && (
+                                        <div className="capture-result err">{'\u26A0'} {t('calNeedCam')}</div>
+                                    )}
+                                    {calMsg && (
+                                        <div className={`capture-result ${calMsg.ok ? 'ok' : 'err'}`}>{calMsg.text}</div>
+                                    )}
+
+
+                                    <div className="capture-divider" />
+
+                                    {/* Lista de imÃ¡genes */}
+                                    <div className="capture-gallery-title" style={{ display: 'flex', alignItems: 'center' }}>
+                                        <span>
+                                            {String.fromCodePoint(0x1F4C2)} {t('calImages')} ({calImages.length})
+                                            {' \u00B7 '}{'\u2714'} {calImages.filter(i => i.corners).length} {t('calValid')}
+                                        </span>
+                                        {calImages.length > 0 && (
+                                            <button className="basler-tab-mini" style={{ marginLeft: 'auto' }} onClick={handleCalClear}>
+                                                {String.fromCodePoint(0x1F5D1)}
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    {calImages.length === 0 ? (
+                                        <div style={{ fontSize: '0.75rem', color: '#484f58', fontFamily: 'monospace' }}>
+                                            &mdash; {t('calNoResult')} &mdash;
+                                        </div>
+                                    ) : (
+                                        <div className="cal-images-list">
+                                            {calImages.map((img, i) => (
+                                                <div key={i} className={`cal-image-item ${img.corners ? 'ok' : 'warn'}`}>
+                                                    <span style={{ fontSize: '0.82rem' }}>
+                                                        {img.corners ? '\u2714' : '\u26A0'} {img.filename}
+                                                    </span>
+                                                    <span style={{ fontSize: '0.7rem', color: '#8b949e', flexShrink: 0 }}>{img.time}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                </>)}
 
                             </div>{/* /capture-panel */}
                         </div>{/* /preview-main-layout */}
@@ -2361,23 +3426,33 @@ undistorted   = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_mtx)`
                     </div>
                 )}
 
+                {/* ══ TAB: TEST ══════════════════════════════════════════════ */}
+                {activeTab === 'test' && (
+                    <div style={{ width: '100%', height: '100%', minHeight: 'calc(100vh - 140px)', overflow: 'auto', flex: 1 }}>
+                        <ImageMeasurement />
+                    </div>
+                )}
+
+
                 {/* ── LOG PANEL ──────────────────────────────────── */}
-                <div className="basler-log-panel">
-                    <div className="basler-log-header">
-                        <span>📋 {t('pylonLog')}</span>
-                        <button className="basler-tab-mini" onClick={() => setLogs([])}>{t('clearBtn')}</button>
+                {activeTab !== 'test' && (
+                    <div className="basler-log-panel">
+                        <div className="basler-log-header">
+                            <span>📋 {t('pylonLog')}</span>
+                            <button className="basler-tab-mini" onClick={() => setLogs([])}>{t('clearBtn')}</button>
+                        </div>
+                        <div className="basler-log-body">
+                            {logs.length === 0 && <span className="log-empty">{t('noLog')}</span>}
+                            {logs.map((l, i) => (
+                                <div key={i} className="log-line">
+                                    <span className="log-time">{l.time}</span>
+                                    <span className="log-msg" style={{ color: logColor(l.level) }}>{l.msg}</span>
+                                </div>
+                            ))}
+                            <div ref={logsEndRef} />
+                        </div>
                     </div>
-                    <div className="basler-log-body">
-                        {logs.length === 0 && <span className="log-empty">{t('noLog')}</span>}
-                        {logs.map((l, i) => (
-                            <div key={i} className="log-line">
-                                <span className="log-time">{l.time}</span>
-                                <span className="log-msg" style={{ color: logColor(l.level) }}>{l.msg}</span>
-                            </div>
-                        ))}
-                        <div ref={logsEndRef} />
-                    </div>
-                </div>
+                )}
 
             </div>
         </div>

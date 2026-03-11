@@ -6,8 +6,9 @@ import norwayFlag from '../Imagenes/bandera.PNG';
 import { getChatResponse } from './services/gemini';
 import PlcConfig from './PlcConfig';
 import BaslerCamera from './BaslerCamera';
+import ConfigScreen from './ConfigScreen';
 import { useTranslation } from './i18n';
-import ImageMeasurement from './ImageMeasurement';
+
 
 interface Detection {
   id: number;
@@ -34,7 +35,7 @@ interface ChatMessage {
 
 function App() {
   const { t, language, setLanguage } = useTranslation();
-  const [activeTab, setActiveTab] = useState<'live' | 'mapping' | 'chat' | 'plc' | 'camera' | 'medicion'>('live');
+  const [activeTab, setActiveTab] = useState<'live' | 'config' | 'chat' | 'plc' | 'camera'>('live');
   const [fps, setFps] = useState(0);
   const [confidenceAvg, setConfidenceAvg] = useState(94);
   const [modelActive, setModelActive] = useState(true);
@@ -168,10 +169,10 @@ function App() {
         <div className="nav-links">
           <button className={`nav-btn ${activeTab === 'live' ? 'active' : ''}`} onClick={() => setActiveTab('live')}>{t('liveInference')}</button>
           <button className={`nav-btn ${activeTab === 'camera' ? 'active' : ''}`} onClick={() => setActiveTab('camera')}>{t('camera')}</button>
-          <button className={`nav-btn ${activeTab === 'mapping' ? 'active' : ''}`} onClick={() => setActiveTab('mapping')}>{t('mapping')}</button>
+          <button className={`nav-btn ${activeTab === 'config' ? 'active' : ''}`} onClick={() => setActiveTab('config')}>⚙ Configuración</button>
           <button className={`nav-btn ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>{t('chat')}</button>
           <button className={`nav-btn ${activeTab === 'plc' ? 'active' : ''}`} onClick={() => setActiveTab('plc')}>{t('plc')}</button>
-          <button className={`nav-btn ${activeTab === 'medicion' ? 'active' : ''}`} onClick={() => setActiveTab('medicion')}>Medición</button>
+
         </div>
         <div className="nav-right" style={{ display: 'flex', alignItems: 'center', marginLeft: '16px', gap: '16px' }}>
           <img
@@ -299,45 +300,9 @@ function App() {
           <BaslerCamera />
         ) : activeTab === 'plc' ? (
           <PlcConfig />
-        ) : activeTab === 'medicion' ? (
-          <ImageMeasurement />
-        ) : activeTab === 'mapping' ? (
-          <div className="mapping-container">
-            <div className="mapping-header">
-              <h2>{t('mapConfig')}</h2>
-              <p>{t('mapDesc')}</p>
-            </div>
-            <div className="mapping-grid">
-              {mappings.map(map => (
-                <div key={map.id} className="mapping-card">
-                  <div className="mapping-field">
-                    <label>{t('classDet')}</label>
-                    <input
-                      type="text"
-                      value={map.label}
-                      onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, label: e.target.value } : m))}
-                      placeholder="Ej: Montacargas"
-                    />
-                  </div>
-                  <div className="mapping-field">
-                    <label>{t('vidFile')}</label>
-                    <input
-                      type="text"
-                      value={map.videoFile}
-                      onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, videoFile: e.target.value } : m))}
-                      placeholder="Ej: Bastidores.mp4"
-                    />
-                  </div>
-                </div>
-              ))}
-              <button
-                className="add-mapping-btn"
-                onClick={() => setMappings([...mappings, { id: Date.now().toString(), label: '', videoFile: '' }])}
-              >
-                {t('addMap')}
-              </button>
-            </div>
-          </div>
+
+        ) : activeTab === 'config' ? (
+          <ConfigScreen mappings={mappings} setMappings={setMappings} />
         ) : activeTab === 'chat' ? (
           <div className="chat-container">
             <div className="chat-header">
