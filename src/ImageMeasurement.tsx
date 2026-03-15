@@ -75,12 +75,48 @@ const ImageMeasurement: React.FC = () => {
     const isInferringRef = useRef<boolean>(false);
     const confidenceRef = useRef<number>(0.0);
 
+    // ── Draggable dimension labels (same as calibration) ──
+    const testDimOffsets = useRef<{ x: { dx: number; dy: number }; y: { dx: number; dy: number }; total: { dx: number; dy: number } }>({ x: { dx: 0, dy: 0 }, y: { dx: 0, dy: 0 }, total: { dx: 0, dy: 0 } });
+    const testDimDrag = useRef<{ which: 'x' | 'y' | 'total'; startMouse: { x: number; y: number }; startOffset: { dx: number; dy: number } } | null>(null);
+    const testDimRects = useRef<{ x: { x: number; y: number; w: number; h: number }; y: { x: number; y: number; w: number; h: number }; total: { x: number; y: number; w: number; h: number } } | null>(null);
+    const [testMoveDimLabels, setTestMoveDimLabels] = useState(false);
+    // Tolerance result for the panel
+    const [toleranceResults, setToleranceResults] = useState<Array<{ label: string; xMm: number; refMm: number; tolPlus: number; tolMinus: number; ok: boolean; hasRef: boolean }>>([]);
+
+    // Global detection label visibility (synced with ConfigScreen/Calibration)
+    const [showDetLabels, setShowDetLabels] = useState<boolean>(() => {
+        const saved = localStorage.getItem('showDetectionLabels');
+        return saved !== null ? saved === 'true' : true;
+    });
+    const showDetLabelsRef = useRef(showDetLabels);
+    useEffect(() => { showDetLabelsRef.current = showDetLabels; }, [showDetLabels]);
+
+    // Track per-class visibility changes from ConfigScreen
+    const [_tolVersion, setTolVersion] = useState(0);
+    const _lastTolJson = useRef(localStorage.getItem('trackTolerances') || '');
+
+    useEffect(() => {
+        const onStorage = () => {
+            const saved = localStorage.getItem('showDetectionLabels');
+            if (saved !== null) setShowDetLabels(saved === 'true');
+            // Also check trackTolerances for per-class visibility changes
+            const tolNow = localStorage.getItem('trackTolerances') || '';
+            if (tolNow !== _lastTolJson.current) {
+                _lastTolJson.current = tolNow;
+                setTolVersion(v => v + 1);
+            }
+        };
+        window.addEventListener('storage', onStorage);
+        const interval = setInterval(onStorage, 1500);
+        return () => { window.removeEventListener('storage', onStorage); clearInterval(interval); };
+    }, []);
+
     // Keep confidenceRef in sync
     useEffect(() => { confidenceRef.current = confidenceThreshold; }, [confidenceThreshold]);
 
     useEffect(() => {
         if (sourceType === 'image') redrawCanvas();
-    }, [segments, points, mode, imageSrc, detections, confidenceThreshold]);
+    }, [segments, points, mode, imageSrc, detections, confidenceThreshold, showDetLabels, _tolVersion]);
 
     const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -363,9 +399,20 @@ const ImageMeasurement: React.FC = () => {
             return `rgba(${r},${g},${b},${alpha})`;
         };
 
+        // Read per-class visibility from tolerance config
+        const _tolSaved = localStorage.getItem('trackTolerances');
+        const _hiddenClasses = new Set<string>();
+        if (_tolSaved) {
+            try {
+                const _tolArr: any[] = JSON.parse(_tolSaved);
+                _tolArr.forEach(t => { if (t.visible === false) _hiddenClasses.add(t.className); });
+            } catch (_) { /* ignore */ }
+        }
+
         dets.forEach(det => {
             const conf = det.confidence ?? 1.0;
             if (conf < threshold) return;
+            if (det.class && _hiddenClasses.has(det.class)) return;
 
             const baseColor = det.class ? getClassColor(det.class) : '#BD00FF';
             let dx = det.x, dy = det.y, dw = det.width, dh = det.height;
@@ -401,17 +448,19 @@ const ImageMeasurement: React.FC = () => {
 
                 const label = `${det.class || 'Obj'} ${(conf * 100).toFixed(0)}%`;
                 const fontSize = Math.max(13, Math.floor(18 * scale));
-                ctx.font = `bold ${fontSize}px Inter, sans-serif`;
-                const tw = ctx.measureText(label).width;
-                ctx.fillStyle = baseColor;
-                ctx.fillRect(bx - 1, by - fontSize - 8, tw + 12, fontSize + 8);
-                ctx.fillStyle = '#fff';
-                ctx.fillText(label, bx + 5, by - 5);
+                if (showDetLabelsRef.current) {
+                    ctx.font = `bold ${fontSize}px Inter, sans-serif`;
+                    const tw = ctx.measureText(label).width;
+                    ctx.fillStyle = baseColor;
+                    ctx.fillRect(bx - 1, by - fontSize - 8, tw + 12, fontSize + 8);
+                    ctx.fillStyle = '#fff';
+                    ctx.fillText(label, bx + 5, by - 5);
+                }
             }
         });
     };
 
-    // Draw track overlay: find matching classes and show distance
+    // Draw track overlay: find matching classes and show distance + tolerance check
     const drawTrackOverlay = (
         ctx: CanvasRenderingContext2D, dets: any[],
         imgW: number, imgH: number, scale: number, offX: number, offY: number,
@@ -431,13 +480,47 @@ const ImageMeasurement: React.FC = () => {
         const detB = findBest(spec.classB);
         if (!detA || !detB) return;
 
-        const getCenter = (det: any) => {
+        // Get measurement point respecting the same mode/edge as calibration spec
+        const getPoint = (det: any, mode: string | undefined, edge: string | undefined) => {
             let dx = det.x, dy = det.y, dw = det.width, dh = det.height;
             const isNorm = (dx > 0 && dx <= 1.1) && (dw > 0 && dw <= 1.1);
             if (isNorm) { dx *= imgW; dy *= imgH; dw *= imgW; dh *= imgH; }
-            return { x: offX + dx * scale, y: offY + dy * scale, bx: offX + (dx - dw / 2) * scale, by: offY + (dy - dh / 2) * scale, bw: dw * scale, bh: dh * scale };
+            const bx = dx - dw / 2, by = dy - dh / 2;
+            // Calculate measurement point based on mode
+            let px = dx, py = dy; // default: center
+            if (mode === 'arista' && edge) {
+                if (edge === 'left') { px = bx; py = dy; }
+                else if (edge === 'right') { px = bx + dw; py = dy; }
+                else if (edge === 'top') { px = dx; py = by; }
+                else if (edge === 'bottom') { px = dx; py = by + dh; }
+            }
+            return {
+                x: offX + px * scale, y: offY + py * scale,
+                bx: offX + bx * scale, by: offY + by * scale, bw: dw * scale, bh: dh * scale,
+                rawX: px, rawY: py,
+            };
         };
-        const a = getCenter(detA), b = getCenter(detB);
+        const a = getPoint(detA, spec.pieceAMode, spec.pieceAEdge);
+        const b = getPoint(detB, spec.pieceBMode, spec.pieceBEdge);
+
+        // ── TRACE JSON spec for debugging ──
+        console.log('[TEST drawTrackOverlay] JSON spec:', JSON.stringify({
+            classA: spec.classA, pieceAMode: spec.pieceAMode, pieceAEdge: spec.pieceAEdge,
+            classB: spec.classB, pieceBMode: spec.pieceBMode, pieceBEdge: spec.pieceBEdge,
+            mmPerPx: spec.mmPerPx,
+            matchedToleranceLabels: spec.matchedToleranceLabels,
+            'calibración distanceXMm': spec.distanceXMm,
+            'calibración distanceYMm': spec.distanceYMm,
+        }, null, 2));
+        console.log('[TEST drawTrackOverlay] detA:', { class: detA.class, x: detA.x, y: detA.y, w: detA.width, h: detA.height });
+        console.log('[TEST drawTrackOverlay] detB:', { class: detB.class, x: detB.x, y: detB.y, w: detB.width, h: detB.height });
+        console.log('[TEST drawTrackOverlay] Punto A (rawX, rawY):', a.rawX.toFixed(1), a.rawY.toFixed(1),
+            `[modo=${spec.pieceAMode}, arista=${spec.pieceAEdge || 'centro'}]`);
+        console.log('[TEST drawTrackOverlay] Punto B (rawX, rawY):', b.rawX.toFixed(1), b.rawY.toFixed(1),
+            `[modo=${spec.pieceBMode}, arista=${spec.pieceBEdge || 'centro'}]`);
+        const traceXpx = Math.abs(b.rawX - a.rawX);
+        const traceXmm = spec.mmPerPx > 0 ? traceXpx * spec.mmPerPx : 0;
+        console.log('[TEST drawTrackOverlay] Distancia X:', traceXpx.toFixed(1), 'px =', traceXmm.toFixed(2), 'mm');
 
         // Highlight boxes
         ctx.strokeStyle = '#00FFFF'; ctx.lineWidth = 3; ctx.setLineDash([8, 4]);
@@ -445,26 +528,92 @@ const ImageMeasurement: React.FC = () => {
         ctx.strokeStyle = '#FF00FF'; ctx.setLineDash([8, 4]);
         ctx.strokeRect(b.bx, b.by, b.bw, b.bh); ctx.setLineDash([]);
 
-        // Connecting line
+        // Compute distances in pixels (raw image coords)
+        const dxPxRaw = Math.abs(b.rawX - a.rawX);
+        const dyPxRaw = Math.abs(b.rawY - a.rawY);
+        const distPxRaw = Math.hypot(dxPxRaw, dyPxRaw);
+        const dxMm = spec.mmPerPx > 0 ? dxPxRaw * spec.mmPerPx : 0;
+        const dyMm = spec.mmPerPx > 0 ? dyPxRaw * spec.mmPerPx : 0;
+        const distMm = spec.mmPerPx > 0 ? distPxRaw * spec.mmPerPx : 0;
+
+        const lw = Math.max(2, 3 * scale);
+        const fs = Math.max(12, 16 * scale);
+
+        // Connecting line (diagonal)
         ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
-        ctx.strokeStyle = '#FFFF00'; ctx.lineWidth = 3;
+        ctx.strokeStyle = '#FFFF00'; ctx.lineWidth = lw;
         ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
 
-        // Distance
-        const distPx = Math.hypot(
-            (detB.x - detA.x) * (((detA.x > 0 && detA.x <= 1.1) ? imgW : 1)),
-            (detB.y - detA.y) * (((detA.y > 0 && detA.y <= 1.1) ? imgH : 1))
-        );
-        const distMm = spec.mmPerPx > 0 ? distPx * spec.mmPerPx : 0;
-        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-        const fs = Math.max(14, 18 * scale);
-        const text = distMm > 0 ? `${distPx.toFixed(1)} px = ${distMm.toFixed(2)} mm` : `${distPx.toFixed(1)} px`;
+        // X guide line (horizontal)
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, a.y);
+        ctx.strokeStyle = '#FF6600'; ctx.lineWidth = lw * 0.7;
+        ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
+
+        // Y guide line (vertical)
+        ctx.beginPath(); ctx.moveTo(b.x, a.y); ctx.lineTo(b.x, b.y);
+        ctx.strokeStyle = '#00FF66'; ctx.lineWidth = lw * 0.7;
+        ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
+
+        // X label (draggable)
+        const xOff = testDimOffsets.current.x;
+        const xMid = (a.x + b.x) / 2 + xOff.dx * scale, xTxtY = a.y - fs * 0.8 + xOff.dy * scale;
+        const xText = dxMm > 0 ? `X: ${dxMm.toFixed(2)} mm` : `X: ${dxPxRaw.toFixed(1)} px`;
+        ctx.font = `bold ${fs * 0.85}px Inter, sans-serif`; ctx.textAlign = 'center';
+        const xTw = ctx.measureText(xText).width;
+        const xRect = { x: xMid - xTw / 2 - 6, y: xTxtY - fs * 0.4, w: xTw + 12, h: fs * 0.9 };
+        ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(xRect.x, xRect.y, xRect.w, xRect.h);
+        ctx.fillStyle = '#FF6600'; ctx.fillText(xText, xMid, xTxtY + fs * 0.25);
+
+        // Y label (draggable)
+        const yOff = testDimOffsets.current.y;
+        const yTxtX = b.x + fs * 0.6 + yOff.dx * scale, yMid = (a.y + b.y) / 2 + yOff.dy * scale;
+        const yText = dyMm > 0 ? `Y: ${dyMm.toFixed(2)} mm` : `Y: ${dyPxRaw.toFixed(1)} px`;
+        const yTw = ctx.measureText(yText).width;
+        const yRect = { x: yTxtX - 6, y: yMid - fs * 0.4, w: yTw + 12, h: fs * 0.9 };
+        ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(yRect.x, yRect.y, yRect.w, yRect.h);
+        ctx.fillStyle = '#00FF66'; ctx.fillText(yText, yTxtX + yTw / 2, yMid + fs * 0.25);
+        ctx.textAlign = 'center';
+
+        // Total distance label (draggable)
+        const tOff = testDimOffsets.current.total;
+        const mx = (a.x + b.x) / 2 + tOff.dx * scale, my = (a.y + b.y) / 2 + tOff.dy * scale;
+        const totalText = distMm > 0 ? `${distPxRaw.toFixed(1)} px = ${distMm.toFixed(2)} mm` : `${distPxRaw.toFixed(1)} px`;
         ctx.font = `bold ${fs}px Inter, sans-serif`;
-        const tw = ctx.measureText(text).width;
+        const tw = ctx.measureText(totalText).width;
+        const tRect = { x: mx - tw / 2 - 8, y: my - fs / 2 - 4, w: tw + 16, h: fs + 8 };
         ctx.fillStyle = 'rgba(0,0,0,0.85)';
-        ctx.fillRect(mx - tw / 2 - 8, my - fs / 2 - 4, tw + 16, fs + 8);
-        ctx.fillStyle = '#FFFF00'; ctx.textAlign = 'center';
-        ctx.fillText(text, mx, my + fs * 0.35);
+        ctx.fillRect(tRect.x, tRect.y, tRect.w, tRect.h);
+        ctx.fillStyle = '#FFFF00'; ctx.fillText(totalText, mx, my + fs * 0.35);
+
+        // Store hit rects for dragging (in canvas coords)
+        testDimRects.current = {
+            x: xRect, y: yRect, total: tRect,
+        };
+
+        // ═══ TOLERANCE MATCHING (use matchedToleranceLabels from saved spec) ═══
+        const savedTol = localStorage.getItem('trackTolerances');
+        const specMatchedLabels: string[] = spec.matchedToleranceLabels || [];
+        if (savedTol && dxMm > 0 && specMatchedLabels.length > 0) {
+            const tolerances: Array<{ className: string; enabled: boolean; measuredValue: number; tolerancePlus: number; toleranceMinus: number }> = JSON.parse(savedTol);
+            const results: typeof toleranceResults = [];
+            for (const label of specMatchedLabels) {
+                const tolEntry = tolerances.find(t => t.className.trim().toLowerCase() === label.trim().toLowerCase());
+                if (tolEntry) {
+                    const refValue = tolEntry.measuredValue;
+                    const isOk = refValue > 0 && dxMm >= (refValue - tolEntry.toleranceMinus) && dxMm <= (refValue + tolEntry.tolerancePlus);
+                    results.push({
+                        label, xMm: dxMm, refMm: refValue,
+                        tolPlus: tolEntry.tolerancePlus, tolMinus: tolEntry.toleranceMinus,
+                        ok: isOk, hasRef: refValue > 0,
+                    });
+                }
+            }
+            // Update state for the UI panel (avoid re-render loop by checking for changes)
+            setToleranceResults(prev => {
+                if (JSON.stringify(prev) === JSON.stringify(results)) return prev;
+                return results;
+            });
+        }
     };
 
     const toggleVideoPlayPause = () => {
@@ -595,10 +744,10 @@ const ImageMeasurement: React.FC = () => {
             return `rgba(${r}, ${g}, ${b}, ${alpha})`;
         };
 
-        // Determinar qué imagen base dibujar:
-        // Si Roboflow ya envió su imagen renderizada, la usamos; si no, la original.
-        const baseImg = roboflowImageRef.current || imageElementRef.current;
-        // Para mapeo de coordenadas de predicciones siempre usamos la imagen original
+        // Always use the original clean image so visibility filtering works correctly.
+        // (roboflowImageRef has all detections pre-painted by the backend, ignoring visibility settings)
+        const baseImg = imageElementRef.current;
+        // For coordinate mapping we also use the original image
         const origImg = imageElementRef.current;
 
         if (baseImg) {
@@ -611,9 +760,20 @@ const ImageMeasurement: React.FC = () => {
             // Sobre la imagen base, dibujamos las predicciones interactivas (para el slider)
             // Solo si hay predicciones y podemos mapear sus coordenadas
             if (detections && detections.length > 0 && origImg) {
+                // Read per-class visibility from tolerance config
+                const _tolSaved2 = localStorage.getItem('trackTolerances');
+                const _hiddenClasses2 = new Set<string>();
+                if (_tolSaved2) {
+                    try {
+                        const _tolArr2: any[] = JSON.parse(_tolSaved2);
+                        _tolArr2.forEach(t => { if (t.visible === false) _hiddenClasses2.add(t.className); });
+                    } catch (_) { /* ignore */ }
+                }
+
                 detections.forEach(det => {
                     const conf = det.confidence !== undefined ? det.confidence : 1.0;
                     if (conf < confidenceThreshold) return;
+                    if (det.class && _hiddenClasses2.has(det.class)) return;
 
                     const baseColor = det.class ? getClassColor(det.class) : '#BD00FF';
 
@@ -673,16 +833,18 @@ const ImageMeasurement: React.FC = () => {
                         ctx.lineWidth = Math.max(3, 3 * coordScale);
                         ctx.strokeRect(boxX, boxY, boxW, boxH);
 
-                        const label = `${det.class || 'Obj'} ${(conf * 100).toFixed(0)}%`;
-                        const fontSize = Math.max(14, Math.floor(20 * coordScale));
-                        ctx.font = `bold ${fontSize}px Inter, sans-serif`;
+                        if (showDetLabels) {
+                            const label = `${det.class || 'Obj'} ${(conf * 100).toFixed(0)}%`;
+                            const fontSize = Math.max(14, Math.floor(20 * coordScale));
+                            ctx.font = `bold ${fontSize}px Inter, sans-serif`;
 
-                        const textW = ctx.measureText(label).width;
-                        ctx.fillStyle = baseColor;
-                        ctx.fillRect(boxX - 1.5, boxY - fontSize - 10, textW + 15, fontSize + 10);
+                            const textW = ctx.measureText(label).width;
+                            ctx.fillStyle = baseColor;
+                            ctx.fillRect(boxX - 1.5, boxY - fontSize - 10, textW + 15, fontSize + 10);
 
-                        ctx.fillStyle = '#fff';
-                        ctx.fillText(label, boxX + 6, boxY - 7);
+                            ctx.fillStyle = '#fff';
+                            ctx.fillText(label, boxX + 6, boxY - 7);
+                        }
                     }
                 });
 
@@ -745,6 +907,25 @@ const ImageMeasurement: React.FC = () => {
     };
 
     const handleMouseDown = (e: MouseEvent<HTMLCanvasElement>) => {
+        // Check for dimension label dragging first
+        if (testMoveDimLabels && e.button === 0 && testDimRects.current) {
+            const canvas = canvasRef.current;
+            if (canvas) {
+                const rect = canvas.getBoundingClientRect();
+                const scX = canvas.width / rect.width, scY = canvas.height / rect.height;
+                const cx = (e.clientX - rect.left) * scX, cy = (e.clientY - rect.top) * scY;
+                const rects = testDimRects.current;
+                for (const key of ['x', 'y', 'total'] as const) {
+                    const r = rects[key];
+                    if (cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) {
+                        e.preventDefault();
+                        testDimDrag.current = { which: key, startMouse: { x: cx, y: cy }, startOffset: { ...testDimOffsets.current[key] } };
+                        return;
+                    }
+                }
+            }
+        }
+        if (testMoveDimLabels) return; // block other actions while in move mode
         if (!imageSrc) return;
         const pt = getCanvasPoint(e);
 
@@ -760,12 +941,32 @@ const ImageMeasurement: React.FC = () => {
     };
 
     const handleMouseMove = (e: MouseEvent<HTMLCanvasElement>) => {
+        // Dragging a dimension label
+        if (testDimDrag.current) {
+            const canvas = canvasRef.current;
+            if (canvas) {
+                const rect = canvas.getBoundingClientRect();
+                const scX = canvas.width / rect.width, scY = canvas.height / rect.height;
+                const cx = (e.clientX - rect.left) * scX, cy = (e.clientY - rect.top) * scY;
+                const d = testDimDrag.current;
+                testDimOffsets.current[d.which] = {
+                    dx: d.startOffset.dx + (cx - d.startMouse.x),
+                    dy: d.startOffset.dy + (cy - d.startMouse.y),
+                };
+                redrawCanvas();
+            }
+            return;
+        }
         if (mode === 'segmentos' && currentSegmentStart) {
             redrawCanvas(getCanvasPoint(e));
         }
     };
 
     const handleMouseUp = (e: MouseEvent<HTMLCanvasElement>) => {
+        if (testDimDrag.current) {
+            testDimDrag.current = null;
+            return;
+        }
         if (mode === 'segmentos' && currentSegmentStart) {
             const pt = getCanvasPoint(e);
             // Avoid tiny segments
@@ -919,6 +1120,45 @@ const ImageMeasurement: React.FC = () => {
                         <p style={{ marginTop: 10, color: 'white' }}>Procesando imagen y calculando cotas...</p>
                     </div>
                 )}
+
+                {/* ══ PIEZA MAL COLGADA — flashing red banner ══ */}
+                {toleranceResults.some(r => r.hasRef && !r.ok) && (
+                    <div style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        zIndex: 20,
+                        animation: 'bannerBlink 0.8s ease-in-out infinite',
+                        pointerEvents: 'none',
+                    }}>
+                        <div style={{
+                            background: 'linear-gradient(135deg, #cc0000, #ff0000, #cc0000)',
+                            color: '#fff',
+                            textAlign: 'center',
+                            padding: '14px 20px',
+                            fontSize: 'clamp(18px, 3vw, 32px)',
+                            fontWeight: 900,
+                            fontFamily: 'Inter, Arial Black, sans-serif',
+                            letterSpacing: '3px',
+                            textTransform: 'uppercase',
+                            textShadow: '0 0 10px #000, 0 0 30px #ff0000, 0 2px 4px rgba(0,0,0,0.8)',
+                            boxShadow: '0 4px 20px rgba(255,0,0,0.6), inset 0 -2px 6px rgba(0,0,0,0.3)',
+                            borderBottom: '3px solid #990000',
+                        }}>
+                            ⚠ PIEZA MAL COLGADA ⚠
+                        </div>
+                    </div>
+                )}
+
+                {/* Keyframes injected via style tag */}
+                <style>{`
+                    @keyframes bannerBlink {
+                        0%, 100% { opacity: 1; }
+                        50% { opacity: 0.25; }
+                    }
+                `}</style>
+
             </div>
 
             <div style={styles.controlPanel}>
@@ -966,6 +1206,67 @@ const ImageMeasurement: React.FC = () => {
                         />
                     </div>
                 </div>
+
+                {/* Mover Cotas toggle */}
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+                    <button
+                        style={{
+                            padding: '6px 12px', fontSize: '0.72rem', fontWeight: 600, borderRadius: 4, cursor: 'pointer',
+                            border: `2px solid ${testMoveDimLabels ? '#FF6600' : '#30363d'}`,
+                            background: testMoveDimLabels ? '#FF660018' : '#161b22',
+                            color: testMoveDimLabels ? '#FF6600' : '#8b949e', flex: 1,
+                        }}
+                        onClick={() => setTestMoveDimLabels(v => !v)}
+                    >
+                        📌 {testMoveDimLabels ? 'MOVIENDO COTAS' : 'Mover Cotas'}
+                    </button>
+                    {testMoveDimLabels && (
+                        <button
+                            style={{
+                                padding: '4px 8px', fontSize: '0.62rem', fontWeight: 600, borderRadius: 4, cursor: 'pointer',
+                                border: '1px solid #30363d', background: '#161b22', color: '#8b949e',
+                            }}
+                            onClick={() => {
+                                testDimOffsets.current = { x: { dx: 0, dy: 0 }, y: { dx: 0, dy: 0 }, total: { dx: 0, dy: 0 } };
+                                redrawCanvas();
+                            }}
+                        >
+                            ↺ Reset
+                        </button>
+                    )}
+                </div>
+
+                {/* Tolerance result panel */}
+                {toleranceResults.length > 0 && (
+                    <div style={{
+                        background: '#0d1117', border: '2px solid #1f6feb', borderRadius: 8,
+                        padding: '10px 12px', marginBottom: 10,
+                    }}>
+                        <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#1f6feb', marginBottom: 6 }}>📐 Resultado Tolerancias</div>
+                        {toleranceResults.map((r, i) => (
+                            <div key={i} style={{
+                                display: 'flex', flexDirection: 'column', gap: 2, padding: '6px 8px', borderRadius: 4, marginBottom: 4,
+                                background: r.hasRef ? (r.ok ? '#3fb95010' : '#f8514910') : '#30363d10',
+                                border: `1px solid ${r.hasRef ? (r.ok ? '#3fb95040' : '#f8514940') : '#30363d'}`,
+                            }}>
+                                <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#e6edf3' }}>{r.label}</div>
+                                <div style={{ fontSize: '0.7rem', color: '#8b949e' }}>
+                                    X medido: <span style={{ color: '#FF6600', fontWeight: 600 }}>{r.xMm.toFixed(2)} mm</span>
+                                </div>
+                                <div style={{ fontSize: '0.7rem', color: '#8b949e' }}>
+                                    Referencia: <span style={{ color: '#e6edf3' }}>{r.refMm.toFixed(2)} mm</span>
+                                    <span style={{ marginLeft: 4 }}>[+{r.tolPlus} / -{r.tolMinus}]</span>
+                                </div>
+                                <div style={{
+                                    fontSize: '0.82rem', fontWeight: 700, marginTop: 2,
+                                    color: r.hasRef ? (r.ok ? '#3fb950' : '#f85149') : '#8b949e',
+                                }}>
+                                    {r.hasRef ? (r.ok ? '✓ OK — dentro de tolerancia' : '✗ FUERA de tolerancia') : '— Sin valor de referencia'}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
 
                 {measurementResult && (
                     <div style={styles.resultCard}>

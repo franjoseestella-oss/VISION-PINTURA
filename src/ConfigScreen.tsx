@@ -10,6 +10,7 @@ interface VideoMapping {
 interface TrackTolerance {
     className: string;
     enabled: boolean;
+    visible: boolean;
     measuredValue: number;
     tolerancePlus: number;
     toleranceMinus: number;
@@ -35,23 +36,20 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings }) =>
     const [loadingClasses, setLoadingClasses] = useState(false);
     const [classesError, setClassesError] = useState<string | null>(null);
 
+    // ═══ GLOBAL LABEL VISIBILITY ═══
+    const [showLabelsGlobal, setShowLabelsGlobal] = useState<boolean>(() => {
+        const saved = localStorage.getItem('showDetectionLabels');
+        return saved !== null ? saved === 'true' : true;
+    });
+    useEffect(() => {
+        localStorage.setItem('showDetectionLabels', String(showLabelsGlobal));
+    }, [showLabelsGlobal]);
+
     // Persist tolerances
     useEffect(() => {
         localStorage.setItem('trackTolerances', JSON.stringify(tolerances));
     }, [tolerances]);
 
-    // Read trackSpec from localStorage for measured value
-    const [trackSpec, setTrackSpec] = useState<any>(() => {
-        const saved = localStorage.getItem('trackSpec');
-        return saved ? JSON.parse(saved) : null;
-    });
-    useEffect(() => {
-        const interval = setInterval(() => {
-            const saved = localStorage.getItem('trackSpec');
-            setTrackSpec(saved ? JSON.parse(saved) : null);
-        }, 2000);
-        return () => clearInterval(interval);
-    }, []);
 
     // Fetch Roboflow classes from backend
     const fetchRoboflowClasses = useCallback(async () => {
@@ -76,6 +74,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings }) =>
                         .map((c: string) => ({
                             className: c,
                             enabled: true,
+                            visible: true,
                             measuredValue: 0,
                             tolerancePlus: 0.5,
                             toleranceMinus: 0.5,
@@ -105,16 +104,6 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings }) =>
         fetchRoboflowClasses();
     }, [fetchRoboflowClasses]);
 
-    // Update measured value when trackSpec changes
-    useEffect(() => {
-        if (!trackSpec) return;
-        setTolerances(prev => prev.map(t => {
-            if (t.className === trackSpec.classA || t.className === trackSpec.classB) {
-                return { ...t, measuredValue: trackSpec.distanceMm || 0 };
-            }
-            return t;
-        }));
-    }, [trackSpec]);
 
     const updateTolerance = (idx: number, field: keyof TrackTolerance, value: any) => {
         setTolerances(prev => {
@@ -195,7 +184,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings }) =>
                 ) : (
                     /* ═══ TOLERANCIAS TRACKING ═══ */
                     <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
                             <h2 style={{ fontSize: '1.2rem', fontWeight: 700, color: '#fff', margin: 0 }}>📐 Tolerancias Tracking</h2>
                             <button
                                 onClick={fetchRoboflowClasses}
@@ -207,27 +196,31 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings }) =>
                             >
                                 {loadingClasses ? '⏳ Cargando...' : '🔄 Importar Etiquetas Roboflow'}
                             </button>
+                            {/* Global label visibility toggle */}
+                            <button
+                                onClick={() => setShowLabelsGlobal(v => !v)}
+                                style={{
+                                    padding: '6px 14px', fontSize: '0.75rem', fontWeight: 600, borderRadius: 4, cursor: 'pointer',
+                                    border: `2px solid ${showLabelsGlobal ? '#BD00FF' : '#30363d'}`,
+                                    background: showLabelsGlobal ? '#BD00FF18' : '#161b22',
+                                    color: showLabelsGlobal ? '#BD00FF' : '#8b949e',
+                                    marginLeft: 'auto',
+                                }}
+                            >
+                                {showLabelsGlobal ? '👁 Etiquetas Visibles' : '👁‍🗨 Etiquetas Ocultas'}
+                            </button>
                             {classesError && (
                                 <span style={{ fontSize: '0.7rem', color: '#f8514950' }}>⚠ {classesError}</span>
                             )}
                         </div>
                         <p style={{ fontSize: '0.78rem', color: '#8b949e', marginBottom: 12 }}>
                             Define las tolerancias para cada etiqueta del proyecto Roboflow. El valor medido se importa automáticamente al guardar un track.
+                            <br />
+                            <span style={{ color: '#BD00FF', fontWeight: 600 }}>
+                                {showLabelsGlobal ? '👁 Las etiquetas son visibles en todas las pantallas' : '👁‍🗨 Las etiquetas están ocultas en todas las pantallas'}
+                            </span>
                         </p>
 
-                        {/* Track spec info */}
-                        {trackSpec && (
-                            <div style={{
-                                display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', marginBottom: 12,
-                                background: '#FFFF0010', border: '1px solid #FFFF0025', borderRadius: 6, fontSize: '0.78rem',
-                            }}>
-                                <span style={{ color: '#FFFF00' }}>🎯 Track activo:</span>
-                                <span style={{ color: '#00FFFF' }}>{trackSpec.classA}</span>
-                                <span style={{ color: '#8b949e' }}>↔</span>
-                                <span style={{ color: '#FF00FF' }}>{trackSpec.classB}</span>
-                                <span style={{ color: '#FFFF00', fontWeight: 700 }}>{trackSpec.distanceMm?.toFixed(2)} mm</span>
-                            </div>
-                        )}
 
                         {/* Table */}
                         <div style={{ overflowX: 'auto' }}>
@@ -235,6 +228,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings }) =>
                                 <thead>
                                     <tr style={{ borderBottom: '2px solid #30363d' }}>
                                         <th style={{ padding: '10px 8px', textAlign: 'center', color: '#8b949e', fontWeight: 600, width: 60 }}>✓</th>
+                                        <th style={{ padding: '10px 6px', textAlign: 'center', color: '#BD00FF', fontWeight: 600, width: 50 }}>👁</th>
                                         <th style={{ padding: '10px 12px', textAlign: 'left', color: '#8b949e', fontWeight: 600 }}>Etiqueta Roboflow</th>
                                         <th style={{ padding: '10px 12px', textAlign: 'center', color: '#8b949e', fontWeight: 600, width: 130 }}>Valor Medido (mm)</th>
                                         <th style={{ padding: '10px 12px', textAlign: 'center', color: '#8b949e', fontWeight: 600, width: 130 }}>Tol. + (mm)</th>
@@ -244,21 +238,20 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings }) =>
                                 <tbody>
                                     {tolerances.length === 0 ? (
                                         <tr>
-                                            <td colSpan={5} style={{ padding: 20, textAlign: 'center', color: '#8b949e' }}>
+                                            <td colSpan={6} style={{ padding: 20, textAlign: 'center', color: '#8b949e' }}>
                                                 No hay etiquetas. Pulsa "Importar Etiquetas Roboflow" para cargar las clases del modelo.
                                             </td>
                                         </tr>
                                     ) : tolerances.map((tol, idx) => {
-                                        const isTrackClass = trackSpec && (trackSpec.classA === tol.className || trackSpec.classB === tol.className);
                                         return (
                                             <tr key={tol.className}
                                                 style={{
                                                     borderBottom: '1px solid #21262d',
-                                                    background: isTrackClass ? '#FFFF0008' : 'transparent',
+                                                    background: 'transparent',
                                                     transition: 'background 0.2s',
                                                 }}
                                                 onMouseEnter={(e) => e.currentTarget.style.background = '#161b22'}
-                                                onMouseLeave={(e) => e.currentTarget.style.background = isTrackClass ? '#FFFF0008' : 'transparent'}
+                                                onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
                                             >
                                                 <td style={{ padding: '8px', textAlign: 'center' }}>
                                                     <input
@@ -268,21 +261,43 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings }) =>
                                                         style={{ width: 18, height: 18, cursor: 'pointer', accentColor: '#1f6feb' }}
                                                     />
                                                 </td>
+                                                <td style={{ padding: '8px 6px', textAlign: 'center' }}>
+                                                    <button
+                                                        onClick={() => {
+                                                            const newVal = !tol.visible;
+                                                            console.log(`[VISIBILITY] ${tol.className}: ${tol.visible} → ${newVal}`);
+                                                            updateTolerance(idx, 'visible', newVal);
+                                                        }}
+                                                        title={tol.visible ? 'Ocultar etiqueta en pantalla' : 'Mostrar etiqueta en pantalla'}
+                                                        style={{
+                                                            background: tol.visible ? '#23863610' : '#f8514910',
+                                                            border: `2px solid ${tol.visible ? '#238636' : '#f85149'}`,
+                                                            borderRadius: 6,
+                                                            cursor: 'pointer',
+                                                            fontSize: '1rem',
+                                                            padding: '4px 8px',
+                                                            minWidth: 38,
+                                                            transition: 'all 0.2s',
+                                                            color: tol.visible ? '#238636' : '#f85149',
+                                                        }}
+                                                    >
+                                                        {tol.visible ? '👁' : '🚫'}
+                                                    </button>
+                                                </td>
                                                 <td style={{ padding: '8px 12px', fontWeight: 600, color: tol.enabled ? '#e6edf3' : '#484f58' }}>
                                                     <span style={{
                                                         display: 'inline-block', width: 10, height: 10, borderRadius: '50%', marginRight: 8,
-                                                        background: isTrackClass ? '#FFFF00' : (tol.enabled ? '#238636' : '#484f58'),
+                                                        background: tol.enabled ? '#238636' : '#484f58',
                                                     }} />
                                                     {tol.className}
-                                                    {isTrackClass && <span style={{ fontSize: '0.65rem', color: '#FFFF00', marginLeft: 6 }}>★ TRACK</span>}
                                                 </td>
                                                 <td style={{ padding: '8px 12px', textAlign: 'center' }}>
                                                     <input
                                                         type="number" step="0.01" value={tol.measuredValue}
-                                                        onChange={(e) => updateTolerance(idx, 'measuredValue', parseFloat(e.target.value) || 0)}
+                                                        readOnly
                                                         style={{
-                                                            width: '100%', padding: '6px 8px', background: '#0d1117', border: '1px solid #30363d',
-                                                            borderRadius: 4, color: '#e6edf3', fontSize: '0.82rem', textAlign: 'center',
+                                                            width: '100%', padding: '6px 8px', background: '#161b22', border: '1px solid #30363d',
+                                                            borderRadius: 4, color: '#8b949e', fontSize: '0.82rem', textAlign: 'center', cursor: 'default',
                                                         }}
                                                     />
                                                 </td>
@@ -322,6 +337,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings }) =>
                                         setTolerances(prev => [...prev, {
                                             className: name.trim(),
                                             enabled: true,
+                                            visible: true,
                                             measuredValue: 0,
                                             tolerancePlus: 0.5,
                                             toleranceMinus: 0.5,

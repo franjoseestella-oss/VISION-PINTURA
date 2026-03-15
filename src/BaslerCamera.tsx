@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from './i18n';
 import ImageMeasurement from './ImageMeasurement';
 
@@ -248,9 +248,28 @@ export default function BaslerCamera() {
     const [calBoardCollapsed, setCalBoardCollapsed] = useState(true);
     const [calMeasureCollapsed, setCalMeasureCollapsed] = useState(false);
     const [calDetections, setCalDetections] = useState<any[]>([]);
-    const [calShowDetectionLabels, setCalShowDetectionLabels] = useState(true);
+    const [calShowDetectionLabels, setCalShowDetectionLabels] = useState(() => {
+        const saved = localStorage.getItem('showDetectionLabels');
+        return saved !== null ? saved === 'true' : true;
+    });
+    // Sync calShowDetectionLabels ↔ localStorage (global setting)
+    useEffect(() => {
+        localStorage.setItem('showDetectionLabels', String(calShowDetectionLabels));
+    }, [calShowDetectionLabels]);
+    useEffect(() => {
+        const onStorage = () => {
+            const saved = localStorage.getItem('showDetectionLabels');
+            if (saved !== null) setCalShowDetectionLabels(saved === 'true');
+        };
+        window.addEventListener('storage', onStorage);
+        const interval = setInterval(onStorage, 2000);
+        return () => { window.removeEventListener('storage', onStorage); clearInterval(interval); };
+    }, []);
     const [calAnalyzing, setCalAnalyzing] = useState(false);
     const [calAnalyzeCollapsed, setCalAnalyzeCollapsed] = useState(false);
+    // Per-detection visibility and selection
+    const [calHiddenDetections, setCalHiddenDetections] = useState<Set<number>>(new Set());
+    const [calSelectedDetIdx, setCalSelectedDetIdx] = useState<number | null>(null);
 
     // Track definition
     type TrackPiece = { det: any; point: { x: number; y: number }; mode: 'centro' | 'arista'; edge?: 'top' | 'bottom' | 'left' | 'right' };
@@ -323,9 +342,24 @@ export default function BaslerCamera() {
                 const r = parseInt(hex.slice(1, 3), 16) || 0, g = parseInt(hex.slice(3, 5), 16) || 0, b = parseInt(hex.slice(5, 7), 16) || 0;
                 return `rgba(${r},${g},${b},${a})`;
             };
-            calDetections.forEach(det => {
+            // Read per-class visibility from tolerance config
+            const _tolSaved = localStorage.getItem('trackTolerances');
+            const _hiddenClasses = new Set<string>();
+            if (_tolSaved) {
+                try {
+                    const _tolArr: any[] = JSON.parse(_tolSaved);
+                    _tolArr.forEach(t => { if (t.visible === false) _hiddenClasses.add(t.className); });
+                } catch (_) { /* ignore parse errors */ }
+            }
+
+            calDetections.forEach((det, detIdx) => {
+                // Skip hidden detections (per-index or per-class)
+                if (calHiddenDetections.has(detIdx)) return;
+                if (det.class && _hiddenClasses.has(det.class)) return;
+
                 const conf = det.confidence ?? 1.0;
                 const color = det.class ? getClassColor(det.class) : '#BD00FF';
+                const isSelected = calSelectedDetIdx === detIdx;
                 let dx = det.x, dy = det.y, dw = det.width, dh = det.height;
                 const isNorm = (dx > 0 && dx <= 1.1) && (dw > 0 && dw <= 1.1);
                 if (isNorm) { dx *= img.naturalWidth; dy *= img.naturalHeight; dw *= img.naturalWidth; dh *= img.naturalHeight; }
@@ -339,18 +373,25 @@ export default function BaslerCamera() {
                         idx === 0 ? ctx.moveTo(ptx, pty) : ctx.lineTo(ptx, pty);
                     });
                     ctx.closePath();
-                    ctx.fillStyle = hexToRgba(color, 0.3);
+                    ctx.fillStyle = hexToRgba(color, isSelected ? 0.5 : 0.3);
                     ctx.fill();
-                    ctx.strokeStyle = color;
-                    ctx.lineWidth = Math.max(2, img.naturalWidth / 600);
+                    ctx.strokeStyle = isSelected ? '#FFFFFF' : color;
+                    ctx.lineWidth = Math.max(isSelected ? 4 : 2, img.naturalWidth / (isSelected ? 400 : 600));
                     ctx.stroke();
                 }
 
                 // Bounding box
                 if (dx !== undefined && dw !== undefined) {
                     const bx = dx - dw / 2, by = dy - dh / 2;
+                    // Selected: draw a glowing highlight
+                    if (isSelected) {
+                        ctx.strokeStyle = '#FFFFFF';
+                        ctx.lineWidth = Math.max(6, img.naturalWidth / 250);
+                        ctx.setLineDash([]);
+                        ctx.strokeRect(bx - 2, by - 2, dw + 4, dh + 4);
+                    }
                     ctx.strokeStyle = color;
-                    ctx.lineWidth = Math.max(3, img.naturalWidth / 500);
+                    ctx.lineWidth = Math.max(isSelected ? 4 : 3, img.naturalWidth / (isSelected ? 350 : 500));
                     ctx.strokeRect(bx, by, dw, dh);
 
                     // Label
@@ -359,9 +400,9 @@ export default function BaslerCamera() {
                         const fs = Math.max(14, img.naturalWidth / 100);
                         ctx.font = `bold ${fs}px Inter, sans-serif`;
                         const tw = ctx.measureText(label).width;
-                        ctx.fillStyle = color;
+                        ctx.fillStyle = isSelected ? '#FFFFFF' : color;
                         ctx.fillRect(bx - 1, by - fs - 8, tw + 12, fs + 8);
-                        ctx.fillStyle = '#fff';
+                        ctx.fillStyle = isSelected ? '#000' : '#fff';
                         ctx.textAlign = 'left';
                         ctx.fillText(label, bx + 5, by - 5);
                     }
@@ -618,7 +659,7 @@ export default function BaslerCamera() {
     };
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    useEffect(() => { redrawScaleCalCanvas(); }, [scaleCalImageSrc, scaleCalPoints, measurePoints, measureActive, calZoom, calPan, showLabels, calDetections, calShowDetectionLabels, trackPieceA, trackPieceB]);
+    useEffect(() => { redrawScaleCalCanvas(); }, [scaleCalImageSrc, scaleCalPoints, measurePoints, measureActive, calZoom, calPan, showLabels, calDetections, calShowDetectionLabels, trackPieceA, trackPieceB, calHiddenDetections, calSelectedDetIdx]);
 
     // Analyze calibration image with Roboflow
     const analyzeCalImage = async () => {
@@ -634,6 +675,8 @@ export default function BaslerCamera() {
             if (!data.ok) throw new Error(data.error);
             const preds: any[] = Array.isArray(data.predictions) ? data.predictions : [];
             setCalDetections(preds);
+            setCalHiddenDetections(new Set());
+            setCalSelectedDetIdx(null);
             log('success', `Roboflow: ${preds.length} detecciones`);
         } catch (err: any) {
             console.error('[CAL Roboflow]', err);
@@ -698,16 +741,22 @@ export default function BaslerCamera() {
         return -1;
     };
 
-    // Find which detection is at a given image coordinate
-    const findDetectionAtPoint = (imgX: number, imgY: number): any | null => {
+    // Find which detection is at a given image coordinate (returns detection + index)
+    const findDetectionAtPoint = (imgX: number, imgY: number): { det: any; idx: number } | null => {
         const img = scaleCalImageRef.current;
         if (!img) return null;
-        for (const det of calDetections) {
+        // Iterate in reverse so that top-drawn (later) detections are matched first
+        for (let i = calDetections.length - 1; i >= 0; i--) {
+            if (calHiddenDetections.has(i)) continue; // skip hidden
+            const det = calDetections[i];
             let dx = det.x, dy = det.y, dw = det.width, dh = det.height;
             const isNorm = (dx > 0 && dx <= 1.1) && (dw > 0 && dw <= 1.1);
             if (isNorm) { dx *= img.naturalWidth; dy *= img.naturalHeight; dw *= img.naturalWidth; dh *= img.naturalHeight; }
             const left = dx - dw / 2, top = dy - dh / 2;
-            if (imgX >= left && imgX <= left + dw && imgY >= top && imgY <= top + dh) return det;
+            // Also check the label area above the bounding box
+            const fs = Math.max(14, img.naturalWidth / 100);
+            const labelTop = top - fs - 8;
+            if (imgX >= left && imgX <= left + dw && imgY >= labelTop && imgY <= top + dh) return { det, idx: i };
         }
         return null;
     };
@@ -719,8 +768,9 @@ export default function BaslerCamera() {
         if (trackMode && calDetections.length > 0) {
             const coords = screenToImageCoords(e);
             if (!coords) return;
-            const det = findDetectionAtPoint(coords.x, coords.y);
-            if (!det) return;
+            const found = findDetectionAtPoint(coords.x, coords.y);
+            if (!found) return;
+            const det = found.det;
 
             const imgEl = scaleCalImageRef.current;
             if (!imgEl) return;
@@ -766,6 +816,21 @@ export default function BaslerCamera() {
             return;
         }
 
+        // Click on detection to select/deselect it (when not in track mode or measure mode)
+        if (!measureActive && calDetections.length > 0) {
+            const coords2 = screenToImageCoords(e);
+            if (coords2) {
+                const found = findDetectionAtPoint(coords2.x, coords2.y);
+                if (found) {
+                    setCalSelectedDetIdx(prev => prev === found.idx ? null : found.idx);
+                    return;
+                } else {
+                    // Click on empty area: deselect
+                    setCalSelectedDetIdx(null);
+                }
+            }
+            return;
+        }
         if (!measureActive) return;
         if (calDragging.current) return;
         if (wasDraggingPoint.current) { wasDraggingPoint.current = false; return; }
@@ -814,8 +879,8 @@ export default function BaslerCamera() {
             pieceBEdge: trackPieceB.edge,
         };
 
-        // Save spec in localStorage for TEST screen
-        localStorage.setItem('trackSpec', JSON.stringify(spec));
+        // Save spec in localStorage for TEST screen (will be updated with matchedLabels below)
+        // localStorage.setItem('trackSpec', JSON.stringify(spec)); -- moved below after matchedLabels computed
         setTrackSpec(spec);
 
         // Save image and JSON to disk
@@ -863,11 +928,20 @@ export default function BaslerCamera() {
             });
             const dataImg = await resImg.json();
 
-            // Save JSON spec
+            // Save JSON spec (include matched tolerance labels)
+            const specWithMatch = {
+                ...spec,
+                matchedToleranceLabels: matchedLabels,
+                matchedDistanceXMm: dxMm,
+                matchedDistanceYMm: dyMm,
+                savedAt: new Date().toISOString(),
+            };
+            // Save full spec with matched labels to localStorage for TEST screen
+            localStorage.setItem('trackSpec', JSON.stringify(specWithMatch));
             const resSpec = await fetch('http://127.0.0.1:8765/api/save-calibration-image', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    image: 'data:application/json;base64,' + btoa(JSON.stringify(spec, null, 2)),
+                    image: 'data:application/json;base64,' + btoa(JSON.stringify(specWithMatch, null, 2)),
                     directory: saveDir,
                     mmPerPx: 0,
                     filename: specFilename,
@@ -2681,8 +2755,8 @@ ${tlConfig.enablePersistentIp ? `
                 )}
 
                 {/* â•”â•â• TAB: CALIBRACIÃ“N â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•— */}
-                {activeTab === 'calibration' && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, flex: 1, minHeight: 0 }}>
+                {/* ── TAB: CALIBRACIÓN ── */}
+                    <div style={{ display: activeTab === 'calibration' ? 'flex' : 'none', flexDirection: 'column', gap: 12, flex: 1, minHeight: 0 }}>
 
                         <div className="preview-main-layout">
 
@@ -2758,22 +2832,49 @@ ${tlConfig.enablePersistentIp ? `
                                                 />
                                             </div>
                                         ) : (
-                                            <label style={{
+                                            <div style={{
                                                 display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                                                width: '100%', minHeight: 400, cursor: 'pointer',
+                                                width: '100%', minHeight: 400,
                                                 background: '#0d1117', border: '2px dashed #30363d', borderRadius: 10,
                                                 color: '#8b949e', gap: 12, transition: 'border-color 0.2s, background 0.2s',
                                             }}
                                                 onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = '#a78bfa'; (e.currentTarget as HTMLElement).style.background = '#0d111799'; }}
                                                 onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = '#30363d'; (e.currentTarget as HTMLElement).style.background = '#0d1117'; }}
+                                                onDragOver={e => { e.preventDefault(); (e.currentTarget as HTMLElement).style.borderColor = '#58a6ff'; }}
+                                                onDragLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = '#30363d'; }}
+                                                onDrop={e => {
+                                                    e.preventDefault();
+                                                    (e.currentTarget as HTMLElement).style.borderColor = '#30363d';
+                                                    const file = e.dataTransfer.files?.[0];
+                                                    if (file && file.type.startsWith('image/')) {
+                                                        const fakeEvent = { target: { files: [file] } } as unknown as React.ChangeEvent<HTMLInputElement>;
+                                                        handleScaleCalImageUpload(fakeEvent);
+                                                    }
+                                                }}
                                             >
                                                 <span style={{ fontSize: '3rem' }}>📷</span>
                                                 <span style={{ fontSize: '1rem', fontWeight: 600, color: '#c4b5fd' }}>Subir Imagen de Referencia</span>
                                                 <span style={{ fontSize: '0.78rem', color: '#484f58', maxWidth: 280, textAlign: 'center' }}>
                                                     Sube una imagen con una medida conocida para calibrar la escala mm/px
                                                 </span>
-                                                <input type="file" accept="image/*" onChange={handleScaleCalImageUpload} style={{ display: 'none' }} />
-                                            </label>
+                                                <label style={{
+                                                    display: 'inline-flex', alignItems: 'center', gap: 8,
+                                                    padding: '10px 28px', marginTop: 8,
+                                                    fontSize: '0.95rem', fontWeight: 700,
+                                                    background: 'linear-gradient(135deg, #1f6feb, #1a56db)',
+                                                    border: '2px solid #58a6ff60',
+                                                    borderRadius: 8, color: '#fff',
+                                                    cursor: 'pointer', letterSpacing: '0.3px',
+                                                    transition: 'all 0.2s',
+                                                    boxShadow: '0 2px 10px #1f6feb40',
+                                                }}
+                                                    onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.05)'; e.currentTarget.style.boxShadow = '0 4px 18px #1f6feb60'; }}
+                                                    onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.boxShadow = '0 2px 10px #1f6feb40'; }}
+                                                >
+                                                    📤 Subir Imagen
+                                                    <input type="file" accept="image/*" onChange={handleScaleCalImageUpload} style={{ display: 'none' }} />
+                                                </label>
+                                            </div>
                                         )
                                     )}
 
@@ -2812,6 +2913,9 @@ ${tlConfig.enablePersistentIp ? `
                                             )}
                                         </div>
                                     )}
+
+
+
 
                                     {/* Overlay: parÃ¡metros tablero */}
                                     <div style={{
@@ -3184,9 +3288,98 @@ undistorted   = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_mtx)`
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.72rem', color: '#BD00FF', marginTop: 2 }}>
                                                 <span>🔬 {calDetections.length} detecciones</span>
                                                 <button className="basler-tab-mini" style={{ fontSize: '0.6rem', borderColor: '#ff444450', color: '#ff4444', marginLeft: 'auto' }}
-                                                    onClick={() => setCalDetections([])}>Limpiar</button>
+                                                    onClick={() => { setCalDetections([]); setCalHiddenDetections(new Set()); setCalSelectedDetIdx(null); }}>Limpiar</button>
                                             </div>
                                         )}
+
+                                        {/* ── LISTA DE ETIQUETAS DETECTADAS ── */}
+                                        {calDetections.length > 0 && (
+                                            <div style={{
+                                                maxHeight: '220px', overflowY: 'auto', marginTop: 6,
+                                                border: '1px solid #BD00FF30', borderRadius: 6,
+                                                background: '#0d111780',
+                                            }}>
+                                                <div style={{
+                                                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                                    padding: '5px 8px', borderBottom: '1px solid #BD00FF20',
+                                                    fontSize: '0.68rem', fontWeight: 700, color: '#BD00FF',
+                                                }}>
+                                                    <span>🏷 Etiquetas detectadas</span>
+                                                </div>
+                                                {(() => {
+                                                    // Filter detections by visibility from ConfigScreen
+                                                    const _tolSaved = localStorage.getItem('trackTolerances');
+                                                    const _hiddenClasses = new Set<string>();
+                                                    if (_tolSaved) {
+                                                        try {
+                                                            const _tolArr: any[] = JSON.parse(_tolSaved);
+                                                            _tolArr.forEach(t => { if (t.visible === false) _hiddenClasses.add(t.className); });
+                                                        } catch (_) { /* ignore */ }
+                                                    }
+                                                    const visibleDetections = calDetections
+                                                        .map((det, origIdx) => ({ det, origIdx }))
+                                                        .filter(({ det }) => !(det.class && _hiddenClasses.has(det.class)));
+                                                    return visibleDetections.map(({ det, origIdx }, idx) => {
+                                                    const isHidden = calHiddenDetections.has(origIdx);
+                                                    const isSelected = calSelectedDetIdx === origIdx;
+                                                    const getClassColor = (cn: string) => {
+                                                        const cols = ['#BD00FF', '#00FFFF', '#FF00FF', '#70FF00', '#FFBD00', '#FF0000', '#0070FF', '#FF00BD', '#00FF70', '#BDFF00'];
+                                                        let h = 0; if (cn) for (let i = 0; i < cn.length; i++) h = cn.charCodeAt(i) + ((h << 5) - h);
+                                                        return cols[Math.abs(h) % cols.length];
+                                                    };
+                                                    const detColor = det.class ? getClassColor(det.class) : '#BD00FF';
+                                                    const conf = det.confidence ?? 1.0;
+                                                    return (
+                                                        <div
+                                                            key={idx}
+                                                            style={{
+                                                                display: 'flex', alignItems: 'center', gap: 6,
+                                                                padding: '4px 8px',
+                                                                borderBottom: idx < calDetections.length - 1 ? '1px solid #21262d' : 'none',
+                                                                background: isSelected ? '#BD00FF18' : 'transparent',
+                                                                cursor: 'pointer',
+                                                                opacity: isHidden ? 0.45 : 1,
+                                                                transition: 'background 0.15s, opacity 0.15s',
+                                                            }}
+                                                            onClick={() => {
+                                                                // Select/deselect on click
+                                                                setCalSelectedDetIdx(prev => prev === idx ? null : idx);
+                                                            }}
+                                                        >
+
+                                                            {/* Color indicator */}
+                                                            <div style={{
+                                                                width: 10, height: 10, borderRadius: '50%',
+                                                                background: detColor, flexShrink: 0,
+                                                                border: isSelected ? '2px solid #fff' : '1px solid #444',
+                                                                boxShadow: isSelected ? `0 0 6px ${detColor}` : 'none',
+                                                            }} />
+                                                            {/* Label name */}
+                                                            <span style={{
+                                                                fontSize: '0.72rem', fontWeight: isSelected ? 700 : 500,
+                                                                color: isSelected ? '#fff' : (isHidden ? '#484f58' : '#e6edf3'),
+                                                                flex: 1,
+                                                                textDecoration: isHidden ? 'line-through' : 'none',
+                                                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                                            }}>
+                                                                {det.class || 'Obj'}
+                                                            </span>
+                                                            {/* Confidence */}
+                                                            <span style={{
+                                                                fontSize: '0.62rem', color: '#8b949e', flexShrink: 0,
+                                                            }}>
+                                                                {(conf * 100).toFixed(0)}%
+                                                            </span>
+                                                            {/* Selection indicator */}
+                                                            {isSelected && (
+                                                                <span style={{ fontSize: '0.7rem', color: '#FFFF00', flexShrink: 0 }}>◆</span>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                }); })()}
+                                            </div>
+                                        )}
+
                                         {!scaleCalImageSrc && (
                                             <div style={{ fontSize: '0.72rem', color: '#8b949e' }}>⚠ Sube una imagen primero para analizarla</div>
                                         )}
@@ -3423,16 +3616,71 @@ undistorted   = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_mtx)`
                             </div>{/* /capture-panel */}
                         </div>{/* /preview-main-layout */}
 
+                        {/* ── BOTÓN FINALIZAR PROCESO ── */}
+                        {scaleCalImageSrc && (
+                            <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 0 4px 0' }}>
+                                <button
+                                    onClick={() => {
+                                        setScaleCalImageSrc(null);
+                                        setScaleCalPoints([]);
+                                        setCalDetections([]);
+                                        setCalHiddenDetections(new Set());
+                                        setCalSelectedDetIdx(null);
+                                        setMeasurePoints([]);
+                                        setCalZoom(1);
+                                        setCalPan({ x: 0, y: 0 });
+                                    }}
+                                    style={{
+                                        padding: '10px 32px',
+                                        fontSize: '0.95rem',
+                                        fontWeight: 700,
+                                        background: 'linear-gradient(135deg, #da3633, #b62324)',
+                                        border: '2px solid #f8514960',
+                                        borderRadius: 8,
+                                        color: '#fff',
+                                        cursor: 'pointer',
+                                        letterSpacing: '0.5px',
+                                        transition: 'all 0.2s',
+                                        boxShadow: '0 2px 8px #f8514930',
+                                    }}
+                                    onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.04)'; e.currentTarget.style.boxShadow = '0 4px 16px #f8514950'; }}
+                                    onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.boxShadow = '0 2px 8px #f8514930'; }}
+                                >
+                                    🏁 Finalizar Proceso
+                                </button>
+                            </div>
+                        )}
+
                     </div>
-                )}
 
                 {/* ══ TAB: TEST ══════════════════════════════════════════════ */}
-                {activeTab === 'test' && (
-                    <div style={{ width: '100%', height: '100%', minHeight: 'calc(100vh - 140px)', overflow: 'auto', flex: 1 }}>
+                    <div style={{ display: activeTab === 'test' ? 'block' : 'none', width: '100%', height: '100%', minHeight: 'calc(100vh - 140px)', overflow: 'auto', flex: 1 }}>
                         <ImageMeasurement />
                     </div>
-                )}
 
+
+                {/* ── Upload Button (bottom-right, calibration) ── */}
+                {activeTab === 'calibration' && (
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '6px 12px 2px 0' }}>
+                        <label style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 8,
+                            padding: '8px 22px',
+                            fontSize: '0.85rem', fontWeight: 700,
+                            background: 'linear-gradient(135deg, #1f6feb, #1a56db)',
+                            border: '2px solid #58a6ff50',
+                            borderRadius: 8, color: '#fff',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s',
+                            boxShadow: '0 2px 10px #1f6feb40',
+                        }}
+                            onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.05)'; e.currentTarget.style.boxShadow = '0 4px 16px #1f6feb60'; }}
+                            onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.boxShadow = '0 2px 10px #1f6feb40'; }}
+                        >
+                            📤 Subir Imagen
+                            <input type="file" accept="image/*" onChange={handleScaleCalImageUpload} style={{ display: 'none' }} />
+                        </label>
+                    </div>
+                )}
 
                 {/* ── LOG PANEL ──────────────────────────────────── */}
                 {activeTab !== 'test' && (
