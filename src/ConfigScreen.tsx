@@ -5,6 +5,7 @@ interface VideoMapping {
     id: string;
     label: string;
     videoFile: string;
+    videoBlobUrl?: string;
 }
 
 interface TrackTolerance {
@@ -19,12 +20,13 @@ interface TrackTolerance {
 interface ConfigScreenProps {
     mappings: VideoMapping[];
     setMappings: React.Dispatch<React.SetStateAction<VideoMapping[]>>;
+    onMappingVideoUpload?: (mappingId: string, file: File) => void;
 }
 
 // ─── Sub-tab type ───────────────────────────────────────────────
 type ConfigTab = 'videoMapping' | 'tolerancias';
 
-const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings }) => {
+const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMappingVideoUpload }) => {
     const [configTab, setConfigTab] = useState<ConfigTab>('tolerancias');
 
     // ═══ TOLERANCIAS TRACKING STATE ═══
@@ -144,42 +146,219 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings }) =>
                     /* ═══ VIDEO MAPPING ═══ */
                     <div>
                         <h2 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: 8, color: '#fff' }}>🎬 Video Mapping Configuration</h2>
-                        <p style={{ fontSize: '0.82rem', color: '#8b949e', marginBottom: 16 }}>Asocia detecciones de clase a archivos de vídeo</p>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
-                            {mappings.map(map => (
-                                <div key={map.id} style={{
-                                    background: '#161b22', border: '1px solid #30363d', borderRadius: 8, padding: 16,
-                                    display: 'flex', flexDirection: 'column', gap: 10,
-                                }}>
-                                    <div>
-                                        <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4 }}>Clase detectada</label>
-                                        <input
-                                            type="text" value={map.label}
-                                            onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, label: e.target.value } : m))}
-                                            placeholder="Ej: Montacargas"
-                                            style={{ width: '100%', padding: '8px 10px', background: '#0d1117', border: '1px solid #30363d', borderRadius: 4, color: '#e6edf3', fontSize: '0.82rem' }}
-                                        />
-                                    </div>
-                                    <div>
-                                        <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4 }}>Archivo de vídeo</label>
-                                        <input
-                                            type="text" value={map.videoFile}
-                                            onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, videoFile: e.target.value } : m))}
-                                            placeholder="Ej: Bastidores.mp4"
-                                            style={{ width: '100%', padding: '8px 10px', background: '#0d1117', border: '1px solid #30363d', borderRadius: 4, color: '#e6edf3', fontSize: '0.82rem' }}
-                                        />
-                                    </div>
-                                    <button
-                                        onClick={() => setMappings(mappings.filter(m => m.id !== map.id))}
-                                        style={{ alignSelf: 'flex-end', fontSize: '0.7rem', color: '#ff4444', background: 'transparent', border: '1px solid #ff444430', borderRadius: 4, padding: '4px 10px', cursor: 'pointer' }}
-                                    >🗑 Eliminar</button>
-                                </div>
-                            ))}
+                        <p style={{ fontSize: '0.82rem', color: '#8b949e', marginBottom: 16 }}>
+                            Asocia cada etiqueta activa a un archivo de vídeo. Importa las etiquetas desde Tolerancias Tracking automáticamente.
+                        </p>
+
+                        {/* Action bar */}
+                        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                            <button
+                                onClick={() => {
+                                    // Import enabled labels from tolerances into mappings
+                                    const enabledLabels = tolerances.filter(t => t.enabled).map(t => t.className);
+                                    if (enabledLabels.length === 0) {
+                                        alert('No hay etiquetas activas en Tolerancias. Ve a la pestaña "Tolerancias Tracking" e importa/activa etiquetas primero.');
+                                        return;
+                                    }
+                                    setMappings(prev => {
+                                        const existingLabels = new Set(prev.map(m => m.label.trim().toLowerCase()));
+                                        const newMappings = enabledLabels
+                                            .filter(label => !existingLabels.has(label.trim().toLowerCase()))
+                                            .map(label => ({ id: `${Date.now()}-${label}`, label, videoFile: '' }));
+                                        if (newMappings.length === 0) {
+                                            alert('Todas las etiquetas activas ya están importadas.');
+                                            return prev;
+                                        }
+                                        return [...prev, ...newMappings];
+                                    });
+                                }}
+                                style={{
+                                    padding: '10px 20px', background: 'linear-gradient(135deg, #238636, #2ea043)', color: '#fff',
+                                    border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: '0.85rem',
+                                    boxShadow: '0 2px 8px rgba(35,134,54,0.4)', transition: 'all 0.2s',
+                                }}
+                            >
+                                📥 Importar Etiquetas Activas
+                            </button>
+                            <button
+                                onClick={() => setMappings([...mappings, { id: Date.now().toString(), label: '', videoFile: '' }])}
+                                style={{
+                                    padding: '10px 20px', background: '#1f6feb', color: '#fff', border: 'none',
+                                    borderRadius: 8, cursor: 'pointer', fontWeight: 600, fontSize: '0.82rem',
+                                    boxShadow: '0 2px 8px rgba(31,111,235,0.3)',
+                                }}
+                            >
+                                + Añadir Manual
+                            </button>
+                            {mappings.length > 0 && (
+                                <span style={{ fontSize: '0.75rem', color: '#8b949e', marginLeft: 'auto' }}>
+                                    {mappings.filter(m => m.videoFile).length}/{mappings.length} con vídeo asignado
+                                </span>
+                            )}
                         </div>
-                        <button
-                            onClick={() => setMappings([...mappings, { id: Date.now().toString(), label: '', videoFile: '' }])}
-                            style={{ marginTop: 12, padding: '10px 20px', background: '#1f6feb', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600, fontSize: '0.82rem' }}
-                        >+ Añadir Mapping</button>
+
+                        {/* Info about active labels */}
+                        {tolerances.filter(t => t.enabled).length > 0 && (
+                            <div style={{
+                                background: '#0d1117', border: '1px solid #23863640', borderRadius: 8,
+                                padding: '10px 14px', marginBottom: 16, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap',
+                            }}>
+                                <span style={{ fontSize: '0.75rem', color: '#3fb950', fontWeight: 600 }}>
+                                    Etiquetas activas en Tolerancias:
+                                </span>
+                                {tolerances.filter(t => t.enabled).map(t => {
+                                    const alreadyMapped = mappings.some(m => m.label.trim().toLowerCase() === t.className.trim().toLowerCase());
+                                    return (
+                                        <span key={t.className} style={{
+                                            fontSize: '0.72rem', fontWeight: 600, padding: '3px 10px', borderRadius: 12,
+                                            background: alreadyMapped ? '#23863620' : '#f8514910',
+                                            border: `1px solid ${alreadyMapped ? '#238636' : '#f8514940'}`,
+                                            color: alreadyMapped ? '#3fb950' : '#f85149',
+                                        }}>
+                                            {alreadyMapped ? '✓' : '○'} {t.className}
+                                        </span>
+                                    );
+                                })}
+                            </div>
+                        )}
+
+                        {/* Mapping cards */}
+                        {mappings.length === 0 ? (
+                            <div style={{
+                                background: '#161b22', border: '2px dashed #30363d', borderRadius: 12,
+                                padding: '40px 20px', textAlign: 'center', color: '#484f58',
+                            }}>
+                                <div style={{ fontSize: '2.5rem', marginBottom: 12 }}>🎬</div>
+                                <div style={{ fontSize: '0.9rem', fontWeight: 600, color: '#8b949e', marginBottom: 6 }}>
+                                    No hay mappings configurados
+                                </div>
+                                <div style={{ fontSize: '0.78rem', color: '#484f58' }}>
+                                    Pulsa "Importar Etiquetas Activas" para traer las etiquetas habilitadas en Tolerancias
+                                </div>
+                            </div>
+                        ) : (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 14 }}>
+                                {mappings.map(map => {
+                                    const hasVideo = !!map.videoFile;
+                                    const isActiveLabel = tolerances.some(t => t.enabled && t.className.trim().toLowerCase() === map.label.trim().toLowerCase());
+                                    return (
+                                        <div key={map.id} style={{
+                                            background: '#161b22',
+                                            border: `1px solid ${hasVideo ? '#23863650' : '#30363d'}`,
+                                            borderRadius: 10, padding: 18,
+                                            display: 'flex', flexDirection: 'column', gap: 12,
+                                            transition: 'all 0.2s',
+                                            boxShadow: hasVideo ? '0 0 12px rgba(35,134,54,0.15)' : 'none',
+                                        }}>
+                                            {/* Header with label and status */}
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                    <div style={{
+                                                        width: 10, height: 10, borderRadius: '50%',
+                                                        background: isActiveLabel ? '#238636' : '#f0883e',
+                                                        boxShadow: isActiveLabel ? '0 0 6px #238636' : 'none',
+                                                    }} />
+                                                    <span style={{ fontSize: '0.72rem', color: isActiveLabel ? '#3fb950' : '#f0883e', fontWeight: 600 }}>
+                                                        {isActiveLabel ? 'Etiqueta Activa' : 'Manual'}
+                                                    </span>
+                                                </div>
+                                                <span style={{
+                                                    fontSize: '0.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: 10,
+                                                    background: hasVideo ? '#23863618' : '#f8514910',
+                                                    color: hasVideo ? '#3fb950' : '#f85149',
+                                                    border: `1px solid ${hasVideo ? '#23863640' : '#f8514930'}`,
+                                                }}>
+                                                    {hasVideo ? '🎥 Asignado' : '⚠ Sin vídeo'}
+                                                </span>
+                                            </div>
+
+                                            {/* Label field */}
+                                            <div>
+                                                <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
+                                                    Etiqueta / Clase Detectada
+                                                </label>
+                                                <input
+                                                    type="text" value={map.label}
+                                                    onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, label: e.target.value } : m))}
+                                                    placeholder="Ej: Montacargas"
+                                                    style={{
+                                                        width: '100%', padding: '8px 12px', background: '#0d1117',
+                                                        border: '1px solid #30363d', borderRadius: 6, color: '#e6edf3',
+                                                        fontSize: '0.85rem', fontWeight: 600, boxSizing: 'border-box',
+                                                    }}
+                                                />
+                                            </div>
+
+                                            {/* Video file field with file picker */}
+                                            <div>
+                                                <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
+                                                    Archivo de Vídeo
+                                                </label>
+                                                <div style={{ display: 'flex', gap: 6 }}>
+                                                    <input
+                                                        type="text" value={map.videoFile}
+                                                        onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, videoFile: e.target.value } : m))}
+                                                        placeholder="Selecciona un vídeo..."
+                                                        readOnly
+                                                        style={{
+                                                            flex: 1, padding: '8px 12px', background: '#0d1117',
+                                                            border: `1px solid ${map.videoBlobUrl ? '#238636' : hasVideo ? '#23863640' : '#30363d'}`, borderRadius: 6,
+                                                            color: map.videoBlobUrl ? '#3fb950' : hasVideo ? '#3fb950' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
+                                                            cursor: 'default',
+                                                        }}
+                                                    />
+                                                    <label style={{
+                                                        padding: '8px 14px', background: 'linear-gradient(135deg, #1f6feb, #388bfd)', color: '#fff', borderRadius: 6,
+                                                        cursor: 'pointer', fontWeight: 600, fontSize: '0.78rem', display: 'flex',
+                                                        alignItems: 'center', gap: 4, whiteSpace: 'nowrap', flexShrink: 0,
+                                                    }}>
+                                                        📁 Subir
+                                                        <input
+                                                            type="file" accept="video/*,.avi,.mov,.wmv,.mkv,.flv"
+                                                            style={{ display: 'none' }}
+                                                            onChange={(e) => {
+                                                                const file = e.target.files?.[0];
+                                                                if (file && onMappingVideoUpload) {
+                                                                    onMappingVideoUpload(map.id, file);
+                                                                }
+                                                            }}
+                                                        />
+                                                    </label>
+                                                </div>
+                                                {/* Video loaded indicator */}
+                                                {map.videoBlobUrl && (
+                                                    <div style={{
+                                                        marginTop: 6, padding: '6px 10px', background: '#23863620', border: '1px solid #23863650',
+                                                        borderRadius: 6, display: 'flex', alignItems: 'center', gap: 8,
+                                                    }}>
+                                                        <span style={{ color: '#3fb950', fontSize: '0.72rem', fontWeight: 700 }}>✓ Vídeo cargado</span>
+                                                        <video
+                                                            src={map.videoBlobUrl}
+                                                            style={{ height: 40, borderRadius: 4, border: '1px solid #30363d' }}
+                                                            muted
+                                                            onMouseEnter={(e) => (e.target as HTMLVideoElement).play()}
+                                                            onMouseLeave={(e) => { const v = e.target as HTMLVideoElement; v.pause(); v.currentTime = 0; }}
+                                                        />
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* Delete button */}
+                                            <button
+                                                onClick={() => setMappings(mappings.filter(m => m.id !== map.id))}
+                                                style={{
+                                                    alignSelf: 'flex-end', fontSize: '0.72rem', color: '#f85149',
+                                                    background: 'transparent', border: '1px solid #f8514925', borderRadius: 6,
+                                                    padding: '5px 12px', cursor: 'pointer', transition: 'all 0.2s',
+                                                }}
+                                            >
+                                                🗑 Eliminar
+                                            </button>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
                     </div>
                 ) : (
                     /* ═══ TOLERANCIAS TRACKING ═══ */

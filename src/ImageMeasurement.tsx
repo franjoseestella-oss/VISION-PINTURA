@@ -590,19 +590,29 @@ const ImageMeasurement: React.FC = () => {
             x: xRect, y: yRect, total: tRect,
         };
 
-        // ═══ TOLERANCE MATCHING (use matchedToleranceLabels from saved spec) ═══
+        // ═══ TOLERANCE MATCHING (use DETECTED classes, not calibration-time labels) ═══
         const savedTol = localStorage.getItem('trackTolerances');
-        const specMatchedLabels: string[] = spec.matchedToleranceLabels || [];
-        if (savedTol && dxMm > 0 && specMatchedLabels.length > 0) {
+        if (savedTol && dxMm > 0) {
             const tolerances: Array<{ className: string; enabled: boolean; measuredValue: number; tolerancePlus: number; toleranceMinus: number }> = JSON.parse(savedTol);
+
+            // Find unique class names actually detected in the current image with enabled tolerance
+            const detectedClasses = new Set<string>();
+            for (const det of dets) {
+                const conf = det.confidence ?? 1;
+                if (conf < threshold) continue;
+                const cn = (det.class || '').trim();
+                if (cn) detectedClasses.add(cn);
+            }
+
             const results: typeof toleranceResults = [];
-            for (const label of specMatchedLabels) {
-                const tolEntry = tolerances.find(t => t.className.trim().toLowerCase() === label.trim().toLowerCase());
+            for (const cn of detectedClasses) {
+                // Find tolerance entry matching this detected class (enabled tick = first column)
+                const tolEntry = tolerances.find(t => t.enabled && t.className.trim().toLowerCase() === cn.toLowerCase());
                 if (tolEntry) {
                     const refValue = tolEntry.measuredValue;
                     const isOk = refValue > 0 && dxMm >= (refValue - tolEntry.toleranceMinus) && dxMm <= (refValue + tolEntry.tolerancePlus);
                     results.push({
-                        label, xMm: dxMm, refMm: refValue,
+                        label: cn, xMm: dxMm, refMm: refValue,
                         tolPlus: tolEntry.tolerancePlus, tolMinus: tolEntry.toleranceMinus,
                         ok: isOk, hasRef: refValue > 0,
                     });
@@ -1151,11 +1161,141 @@ const ImageMeasurement: React.FC = () => {
                     </div>
                 )}
 
+                {/* ══ ETIQUETA ENCONTRADA — bottom sign ══ */}
+                {(() => {
+                    // Get current detections (image or video)
+                    const currentDets = sourceType === 'video' ? videoDetectionsRef.current : detections;
+                    if (!currentDets || currentDets.length === 0) return null;
+
+                    // Read tolerance config — only show classes with enabled tick (first column)
+                    const _tolSavedBanner = localStorage.getItem('trackTolerances');
+                    const enabledClasses = new Set<string>();
+                    if (_tolSavedBanner) {
+                        try {
+                            const arr: any[] = JSON.parse(_tolSavedBanner);
+                            arr.forEach(t => { if (t.enabled) enabledClasses.add(t.className.trim().toLowerCase()); });
+                        } catch (_) { /* */ }
+                    }
+                    if (enabledClasses.size === 0) return null;
+
+                    // Get unique visible class names above threshold AND matching an enabled tolerance
+                    const foundClasses = new Map<string, number>(); // className -> best confidence
+                    currentDets.forEach((det: any) => {
+                        const conf = det.confidence ?? 1.0;
+                        if (conf < confidenceThreshold) return;
+                        const cn = det.class || '';
+                        if (!cn) return;
+                        // Only include if this class has the enabled tick in tolerances
+                        if (!enabledClasses.has(cn.trim().toLowerCase())) return;
+                        const prev = foundClasses.get(cn) ?? 0;
+                        if (conf > prev) foundClasses.set(cn, conf);
+                    });
+
+                    if (foundClasses.size === 0) return null;
+
+                    // Color helper
+                    const getClassColor = (className: string) => {
+                        const colors = ['#BD00FF', '#00FFFF', '#FF00FF', '#70FF00', '#FFBD00', '#FF0000', '#0070FF', '#FF00BD', '#00FF70', '#BDFF00'];
+                        let hash = 0;
+                        for (let i = 0; i < className.length; i++) hash = className.charCodeAt(i) + ((hash << 5) - hash);
+                        return colors[Math.abs(hash) % colors.length];
+                    };
+
+                    // Determine global OK/FUERA from tolerance results
+                    const hasAnyFuera = toleranceResults.some(r => r.hasRef && !r.ok);
+                    const hasAnyOk = toleranceResults.some(r => r.hasRef && r.ok);
+                    const statusBorder = hasAnyFuera ? '#ff0000' : hasAnyOk ? '#00ff64' : '#1f6feb';
+                    const statusBg = hasAnyFuera ? 'rgba(255,0,0,0.2)' : hasAnyOk ? 'rgba(0,255,100,0.15)' : 'rgba(31,111,235,0.15)';
+                    const statusGlow = hasAnyFuera ? 'rgba(255,0,0,0.6)' : hasAnyOk ? 'rgba(0,255,100,0.5)' : 'rgba(31,111,235,0.4)';
+
+                    return (
+                        <div style={{
+                            position: 'absolute',
+                            bottom: sourceType === 'video' && videoSrc ? 65 : 12,
+                            left: '50%',
+                            transform: 'translateX(-50%)',
+                            zIndex: 18,
+                            pointerEvents: 'none',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 12,
+                            maxWidth: '98%',
+                            background: statusBg,
+                            backdropFilter: 'blur(12px)',
+                            border: `3px solid ${statusBorder}`,
+                            borderRadius: 14,
+                            padding: '14px 32px',
+                            boxShadow: `0 0 30px ${statusGlow}, 0 4px 12px rgba(0,0,0,0.7)`,
+                            animation: hasAnyFuera ? 'labelBannerPulse 1.2s ease-in-out infinite' : 'none',
+                        }}>
+                            {/* Pulsing indicator dot */}
+                            <div style={{
+                                width: 20, height: 20, borderRadius: '50%',
+                                background: statusBorder,
+                                boxShadow: `0 0 16px ${statusBorder}`,
+                                flexShrink: 0,
+                                animation: 'labelDotPulse 2s ease-in-out infinite',
+                            }} />
+                            {/* Found detection class names */}
+                            <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+                                {Array.from(foundClasses.entries()).map(([cn, _conf]) => {
+                                    const color = getClassColor(cn);
+                                    return (
+                                        <span key={cn} style={{
+                                            fontSize: 'clamp(22px, 3.5vw, 38px)',
+                                            fontWeight: 900,
+                                            color: color,
+                                            fontFamily: 'Inter, Arial Black, sans-serif',
+                                            letterSpacing: '2px',
+                                            textShadow: `0 2px 8px rgba(0,0,0,0.9), 0 0 20px ${color}40`,
+                                        }}>
+                                            {cn}
+                                        </span>
+                                    );
+                                })}
+                            </div>
+                            {/* Tolerance status badge (if available) */}
+                            {toleranceResults.length > 0 && (() => {
+                                const isFuera = hasAnyFuera;
+                                const isOk = hasAnyOk && !hasAnyFuera;
+                                const textColor = isFuera ? '#ff4444' : isOk ? '#00ff64' : '#58a6ff';
+                                const statusIcon = isFuera ? '✗' : isOk ? '✓' : '—';
+                                const statusText = isFuera ? 'FUERA' : isOk ? 'OK' : 'SIN REF';
+                                return (
+                                    <div style={{
+                                        background: isFuera ? '#ff000040' : isOk ? '#00ff6430' : '#1f6feb30',
+                                        border: `2px solid ${statusBorder}`,
+                                        borderRadius: 8,
+                                        padding: '6px 16px',
+                                        fontSize: 'clamp(16px, 2.5vw, 26px)',
+                                        fontWeight: 900,
+                                        color: textColor,
+                                        fontFamily: 'Inter, sans-serif',
+                                        letterSpacing: '2px',
+                                        textShadow: `0 0 12px ${statusGlow}`,
+                                        whiteSpace: 'nowrap',
+                                    }}>
+                                        {statusIcon} {statusText}
+                                    </div>
+                                );
+                            })()}
+                        </div>
+                    );
+                })()}
+
                 {/* Keyframes injected via style tag */}
                 <style>{`
                     @keyframes bannerBlink {
                         0%, 100% { opacity: 1; }
                         50% { opacity: 0.25; }
+                    }
+                    @keyframes labelBannerPulse {
+                        0%, 100% { box-shadow: 0 0 20px rgba(255,0,0,0.5), 0 2px 8px rgba(0,0,0,0.6); }
+                        50% { box-shadow: 0 0 35px rgba(255,0,0,0.8), 0 2px 16px rgba(0,0,0,0.8); }
+                    }
+                    @keyframes labelDotPulse {
+                        0%, 100% { opacity: 1; transform: scale(1); }
+                        50% { opacity: 0.6; transform: scale(0.85); }
                     }
                 `}</style>
 
