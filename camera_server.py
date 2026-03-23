@@ -30,6 +30,7 @@ import threading
 import io
 import struct
 import traceback
+import base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -123,6 +124,349 @@ def apply_calibration(frame):
     return mapped
 
 load_calibration()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Estado de eliminación de personas en vivo (live stream)
+#  MODO ROBOFLOW SAM3: Segmentación real de personas via API find-people
+# ════════════════════════════════════════════════════════════════════════════
+
+person_removal_state = {
+    "active": False,
+    "fill_color": [255, 255, 255],  # Blanco BGR
+    "confidence": 0.3,              # Umbral de confianza SAM3
+    "persons_found": 0,
+    "fps": 0.0,
+    "error": "",
+    "frames_processed": 0,
+    "mode": "roboflow",             # "roboflow" = SAM3 via Roboflow find-people
+    "draw_contour": True,           # Dibujar borde del contorno además de rellenar
+    "contour_thickness": 2,         # Grosor del borde del contorno
+    "inpaint": False,               # Si True, usa inpainting en vez de fill_color
+    "inpaint_radius": 5,            # Radio de inpainting
+}
+person_removal_lock = threading.Lock()
+processed_frame = None          # Frame con personas eliminadas
+processed_frame_lock = threading.Lock()
+_person_removal_thread = None
+
+
+def _run_sam3_person_detection(image_path, concepts=None, confidence=0.3):
+    """Detecta personas usando el workflow de Roboflow 'find-workers-and-forklifts'.
+    
+    Usa inference_sdk InferenceHTTPClient para llamar al workflow.
+    API: https://detect.roboflow.com
+    Workspace: welding-hqci3
+    
+    Args:
+        image_path: Ruta al archivo de imagen temporal
+        concepts: Lista de conceptos a filtrar (default: ['person'])
+        confidence: Umbral de confianza mínimo (0.0-1.0)
+    
+    Returns:
+        Lista de detecciones filtradas por confianza con class forzado a "person"
+    """
+    if concepts is None:
+        concepts = ['person']
+    
+    from inference_sdk import InferenceHTTPClient
+    
+    API_KEY = "K6YHioHqtuwbsNmR2n7O"
+    WORKSPACE = "welding-hqci3"
+    WORKFLOW_ID = "find-people-and-forklifts"
+    
+    print(f"[SAM3 DETECT] Workflow={WORKFLOW_ID}, image={image_path}, conf={confidence}")
+    
+    try:
+        client = InferenceHTTPClient(
+            api_url="https://detect.roboflow.com",
+            api_key=API_KEY
+        )
+        
+        result_raw = client.run_workflow(
+            workspace_name=WORKSPACE,
+            workflow_id=WORKFLOW_ID,
+            images={"image": image_path},
+            use_cache=True
+        )
+        
+        print(f"[SAM3 DETECT] Resultado raw tipo={type(result_raw).__name__}")
+        
+        # Serializar de forma segura (por si hay objetos numpy, etc.)
+        def to_json(obj):
+            if obj is None: return None
+            if isinstance(obj, (str, int, float, bool)): return obj
+            if isinstance(obj, dict): return {k: to_json(v) for k, v in obj.items()}
+            if isinstance(obj, list): return [to_json(v) for v in obj]
+            if hasattr(obj, 'tolist'): return obj.tolist()  # numpy
+            if hasattr(obj, '__dict__'): return to_json(obj.__dict__)
+            try:
+                import json; json.dumps(obj); return obj
+            except: return str(obj)
+        
+        result = to_json(result_raw)
+        
+        # result es lista: [{count_objects, output_image, predictions:{image, predictions:[...]}}]
+        r0 = result[0] if (isinstance(result, list) and len(result) > 0) else {}
+        
+        count = r0.get("count_objects", 0)
+        print(f"[SAM3 DETECT] Workflow devolvió: count_objects={count}, keys={list(r0.keys())}")
+        
+        # Log completo de las keys y estructura para debug
+        for k, v in r0.items():
+            vtype = type(v).__name__
+            vlen = len(v) if isinstance(v, (list, dict, str)) else ''
+            print(f"[SAM3 DETECT]   key={k}, type={vtype}, len={vlen}")
+        
+        # Extraer predicciones — el workflow puede devolver en varios formatos
+        predictions = []
+        for key in ["predictions", "output", "detections", "results"]:
+            val = r0.get(key)
+            if val is not None:
+                if isinstance(val, dict) and "predictions" in val:
+                    predictions = val["predictions"]
+                elif isinstance(val, list):
+                    predictions = val
+                if predictions:
+                    break
+        
+        print(f"[SAM3 DETECT] Predicciones extraídas: {len(predictions)}")
+        for i, p in enumerate(predictions[:5]):
+            if isinstance(p, dict):
+                print(f"[SAM3 DETECT]   raw[{i}] class={p.get('class','?')}, conf={p.get('confidence','?')}, "
+                      f"x={p.get('x','?')}, y={p.get('y','?')}, w={p.get('width','?')}, h={p.get('height','?')}")
+        
+        # Filtrar por confianza y forzar etiqueta "person"
+        requested_label = concepts[0] if concepts else "person"
+        detections = []
+        for pred in predictions:
+            if isinstance(pred, dict):
+                conf = float(pred.get("confidence", 0))
+                if conf >= confidence:
+                    pred_copy = dict(pred)
+                    pred_copy["class"] = requested_label
+                    detections.append(pred_copy)
+        
+        # Si el workflow solo devuelve count sin predicciones detalladas
+        if count > 0 and len(detections) == 0 and len(predictions) == 0:
+            print(f"[SAM3 DETECT] Workflow detectó {count} objetos pero sin coords detalladas")
+            output_img = r0.get("output_image", {})
+            if isinstance(output_img, dict) and output_img.get("value"):
+                detections = [{"class": "person", "confidence": 1.0, "count": count, 
+                              "output_image_b64": output_img["value"]}]
+        
+        print(f"[SAM3 DETECT] Total predicciones={len(predictions)}, detecciones={len(detections)}, count_objects={count}")
+        for i, p in enumerate(detections[:5]):
+            print(f"[SAM3 DETECT]   [{i}] class={p.get('class','?')}, conf={p.get('confidence',0)}")
+        
+        return detections
+        
+    except Exception as e:
+        print(f"[SAM3 DETECT ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def _person_removal_loop():
+    """Hilo de eliminación de personas usando Roboflow workflow 'find-workers-and-forklifts'.
+    
+    Estrategia:
+    - Envía cada frame al workflow de Roboflow via API REST
+    - Detecta personas y las elimina con color sólido o inpainting
+    
+    Velocidad: ~1-3 FPS (depende de latencia API)
+    """
+    global processed_frame
+    import tempfile
+
+    fps_counter = 0
+    fps_timer = time.time()
+    consecutive_errors = 0
+    MAX_CONSECUTIVE_ERRORS = 10
+
+    print("[PERSON REMOVAL] Hilo iniciado — Roboflow SAM3 (modelo fundacional)")
+    print("[PERSON REMOVAL] Velocidad: ~1-3 FPS (depende de latencia API)")
+
+    while True:
+        with person_removal_lock:
+            if not person_removal_state["active"]:
+                break
+            fill_color = person_removal_state.get("fill_color", [255, 255, 255])
+            confidence = person_removal_state.get("confidence", 0.3)
+            draw_contour = person_removal_state.get("draw_contour", True)
+            contour_thickness = person_removal_state.get("contour_thickness", 2)
+            use_inpaint = person_removal_state.get("inpaint", False)
+            inpaint_radius = person_removal_state.get("inpaint_radius", 5)
+
+        # Obtener frame actual
+        with frame_lock:
+            frame = current_frame.copy() if current_frame is not None else None
+
+        if frame is None:
+            time.sleep(0.1)
+            continue
+
+        try:
+            # Convertir mono a BGR si es necesario
+            if len(frame.shape) == 2 or (len(frame.shape) == 3 and frame.shape[2] == 1):
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+            img_h, img_w = frame.shape[:2]
+
+            # ── Guardar frame temporal para enviar a Roboflow ──
+            temp_path = os.path.join(tempfile.gettempdir(), "_person_removal_frame.jpg")
+            cv2.imwrite(temp_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+
+            # ── Llamar a SAM3 para detectar personas ──
+            detections = _run_sam3_person_detection(temp_path, concepts=['person'], confidence=confidence)
+
+            # Limpiar archivo temporal
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except:
+                pass
+
+            num_persons = len(detections)
+
+            with person_removal_lock:
+                person_removal_state["persons_found"] = num_persons
+                person_removal_state["error"] = ""
+
+            # ── Rellenar las siluetas con el color elegido o inpainting ──
+            if num_persons > 0:
+                if use_inpaint:
+                    # Modo inpainting: reconstruir el fondo
+                    mask = np.zeros((img_h, img_w), dtype=np.uint8)
+                    for det in detections:
+                        if "points" in det and isinstance(det["points"], list) and len(det["points"]) >= 3:
+                            poly_pts = [[int(pt.get("x", 0)), int(pt.get("y", 0))] for pt in det["points"]]
+                            cv2.fillPoly(mask, [np.array(poly_pts, np.int32)], 255)
+                        else:
+                            # Fallback: bounding box
+                            cx = float(det.get("x", 0))
+                            cy = float(det.get("y", 0))
+                            w = float(det.get("width", 0))
+                            h = float(det.get("height", 0))
+                            x1 = max(0, int(cx - w / 2))
+                            y1 = max(0, int(cy - h / 2))
+                            x2 = min(img_w, int(cx + w / 2))
+                            y2 = min(img_h, int(cy + h / 2))
+                            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inpaint_radius * 2 + 1, inpaint_radius * 2 + 1))
+                    mask = cv2.dilate(mask, kernel, iterations=2)
+                    frame = cv2.inpaint(frame, mask, inpaintRadius=inpaint_radius, flags=cv2.INPAINT_TELEA)
+                else:
+                    # Modo fill_color: rellenar siluetas con color sólido
+                    for det in detections:
+                        if "points" in det and isinstance(det["points"], list) and len(det["points"]) >= 3:
+                            poly_pts = [[int(pt.get("x", 0)), int(pt.get("y", 0))] for pt in det["points"]]
+                            poly_arr = np.array(poly_pts, np.int32)
+                            cv2.fillPoly(frame, [poly_arr], fill_color)
+                            if draw_contour:
+                                border_b = max(0, fill_color[0] - 80)
+                                border_g = max(0, fill_color[1] - 80)
+                                border_r = max(0, fill_color[2] - 80)
+                                cv2.polylines(frame, [poly_arr], True, [border_b, border_g, border_r], contour_thickness)
+                        else:
+                            # Fallback: bounding box con color sólido
+                            cx = float(det.get("x", 0))
+                            cy = float(det.get("y", 0))
+                            w = float(det.get("width", 0))
+                            h = float(det.get("height", 0))
+                            x1 = max(0, int(cx - w / 2))
+                            y1 = max(0, int(cy - h / 2))
+                            x2 = min(img_w, int(cx + w / 2))
+                            y2 = min(img_h, int(cy + h / 2))
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), fill_color, -1)
+                            if draw_contour:
+                                border_b = max(0, fill_color[0] - 80)
+                                border_g = max(0, fill_color[1] - 80)
+                                border_r = max(0, fill_color[2] - 80)
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), [border_b, border_g, border_r], contour_thickness)
+
+            with processed_frame_lock:
+                processed_frame = frame
+
+            # Actualizar FPS y contador
+            fps_counter += 1
+            with person_removal_lock:
+                person_removal_state["frames_processed"] += 1
+            now = time.time()
+            if now - fps_timer >= 1.0:
+                with person_removal_lock:
+                    person_removal_state["fps"] = round(fps_counter / (now - fps_timer), 1)
+                fps_counter = 0
+                fps_timer = now
+
+            consecutive_errors = 0  # Reset error counter on success
+
+        except Exception as e:
+            consecutive_errors += 1
+            err_msg = str(e)
+            with person_removal_lock:
+                person_removal_state["error"] = f"Error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {err_msg}"
+
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                print(f"[PERSON REMOVAL] Demasiados errores consecutivos ({consecutive_errors}), deteniendo...")
+                with person_removal_lock:
+                    person_removal_state["active"] = False
+                    person_removal_state["error"] = f"Detenido por errores: {err_msg}"
+                break
+
+            # Esperar más tras error para no saturar la API
+            time.sleep(1.0)
+
+        # Pausa entre llamadas API para no saturar Roboflow
+        time.sleep(0.3)
+
+    # Al salir del bucle, limpiar
+    with processed_frame_lock:
+        processed_frame = None
+    with person_removal_lock:
+        person_removal_state["fps"] = 0.0
+        person_removal_state["persons_found"] = 0
+        person_removal_state["frames_processed"] = 0
+        person_removal_state["error"] = ""
+    print("[PERSON REMOVAL] Hilo de eliminación en vivo DETENIDO")
+
+
+def start_person_removal(fill_color=None, confidence=0.3, use_inpaint=False):
+    """Activa la eliminación de personas en tiempo real (Roboflow SAM3 find-people)."""
+    global _person_removal_thread
+    if fill_color is None:
+        fill_color = [255, 255, 255]  # Blanco por defecto
+    with person_removal_lock:
+        if person_removal_state["active"]:
+            return {"ok": True, "already_active": True}
+        person_removal_state["active"] = True
+        person_removal_state["fill_color"] = fill_color
+        person_removal_state["confidence"] = confidence
+        person_removal_state["inpaint"] = use_inpaint
+        person_removal_state["error"] = ""
+        person_removal_state["frames_processed"] = 0
+        person_removal_state["persons_found"] = 0
+        person_removal_state["fps"] = 0.0
+    _person_removal_thread = threading.Thread(target=_person_removal_loop, daemon=True)
+    _person_removal_thread.start()
+    return {"ok": True, "already_active": False}
+
+
+def stop_person_removal():
+    """Desactiva la eliminación de personas."""
+    global _person_removal_thread, processed_frame
+    with person_removal_lock:
+        if not person_removal_state["active"]:
+            return {"ok": True, "was_active": False}
+        person_removal_state["active"] = False
+    if _person_removal_thread:
+        _person_removal_thread.join(timeout=10)
+        _person_removal_thread = None
+    with processed_frame_lock:
+        processed_frame = None
+    return {"ok": True, "was_active": True}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -520,9 +864,24 @@ def _simulate_frames(params):
 # ════════════════════════════════════════════════════════════════════════════
 
 def get_jpeg_frame(quality=80):
-    """Retorna el frame actual como JPEG bytes."""
-    with frame_lock:
-        frame = current_frame
+    """Retorna el frame actual como JPEG bytes.
+    Si la eliminación de personas está activa, usa el frame procesado."""
+    # Si eliminación de personas está activa, usar el frame procesado
+    use_processed = False
+    with person_removal_lock:
+        use_processed = person_removal_state["active"]
+
+    if use_processed:
+        with processed_frame_lock:
+            frame = processed_frame
+        if frame is None:
+            # Aún no hay frame procesado, usar el original
+            with frame_lock:
+                frame = current_frame
+    else:
+        with frame_lock:
+            frame = current_frame
+
     if frame is None:
         # Frame negro con texto
         frame = np.zeros((400, 640, 3), dtype=np.uint8)
@@ -792,6 +1151,12 @@ class CameraHandler(BaseHTTPRequestHandler):
             self.send_cors()
             self.end_headers()
             self.wfile.write(data)
+
+        # ── /api/sam3/live-status — estado de eliminación de personas en vivo
+        elif path == "/api/sam3/live-status":
+            with person_removal_lock:
+                state_copy = dict(person_removal_state)
+            self._json_response(state_copy)
 
         else:
             self.send_response(404)
@@ -1335,61 +1700,189 @@ class CameraHandler(BaseHTTPRequestHandler):
             disconnect_camera()
             self._json_response({"ok": True})
 
-        # ── /api/roboflow-classes — Get class names from Roboflow project "cargar_piezas"
+        # ── /api/roboflow-classes — Get class names from Roboflow project
         elif path == "/api/roboflow-classes":
             try:
-                import urllib.request
                 api_key = "K6YHioHqtuwbsNmR2n7O"
                 workspace = "welding-hqci3"
-                project = "CARGAR_PIEZAS"
-                # Roboflow REST API: get project details with classes
-                req_url = f"https://api.roboflow.com/{workspace}/{project}?api_key={api_key}"
-                print(f"[ROBOFLOW] Fetching classes from: {req_url}")
+                project_slug = "cargar_piezas"
+                model_id = f"{project_slug}/2"  # versión del modelo
+                classes = []
+
+                # ── Método 1: inference_sdk — obtener clases del modelo via infer ──
+                # Usa serverless.roboflow.com que SÍ funciona en esta red
                 try:
+                    from inference_sdk import InferenceHTTPClient
+                    client = InferenceHTTPClient(
+                        api_url="https://detect.roboflow.com",
+                        api_key=api_key
+                    )
+                    
+                    # Intentar obtener info del modelo (puede tener class_names)
+                    try:
+                        model_info = client.get_model_description(model_id)
+                        print(f"[ROBOFLOW] Model info: {type(model_info).__name__}")
+                        if hasattr(model_info, 'class_names') and model_info.class_names:
+                            classes = sorted(model_info.class_names)
+                        elif isinstance(model_info, dict) and 'class_names' in model_info:
+                            classes = sorted(model_info['class_names'])
+                        print(f"[ROBOFLOW] Classes via model_info: {classes}")
+                    except Exception as mi_err:
+                        print(f"[ROBOFLOW] model_info error: {mi_err}")
+
+                    # Si no obtuvimos clases, intentar con una imagen dummy via workflow
+                    if not classes:
+                        import numpy as np
+                        # Crear imagen negra pequeña (50x50) para una inferencia rápida
+                        dummy_img = np.zeros((50, 50, 3), dtype=np.uint8)
+                        temp_dummy = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_dummy_classes.jpg")
+                        cv2.imwrite(temp_dummy, dummy_img)
+                        
+                        try:
+                            result = client.run_workflow(
+                                workspace_name=workspace,
+                                workflow_id="detect-count-and-visualize-2",
+                                images={"image": temp_dummy},
+                                use_cache=True
+                            )
+                            
+                            # Serializar
+                            def to_json_safe(obj):
+                                if obj is None: return None
+                                if isinstance(obj, (str, int, float, bool)): return obj
+                                if isinstance(obj, dict): return {k: to_json_safe(v) for k, v in obj.items()}
+                                if isinstance(obj, list): return [to_json_safe(v) for v in obj]
+                                if hasattr(obj, 'tolist'): return obj.tolist()
+                                if hasattr(obj, '__dict__'): return to_json_safe(obj.__dict__)
+                                try:
+                                    json.dumps(obj); return obj
+                                except: return str(obj)
+                            
+                            result = to_json_safe(result)
+                            r0 = result[0] if isinstance(result, list) and len(result) > 0 else {}
+                            
+                            # Extraer class_names de las predicciones (el workflow puede incluir metadata)
+                            preds_raw = r0.get("predictions", {})
+                            if isinstance(preds_raw, dict):
+                                # La estructura predictions puede tener "image" con metadata
+                                img_meta = preds_raw.get("image", {})
+                                if isinstance(img_meta, dict):
+                                    print(f"[ROBOFLOW] predictions.image keys: {list(img_meta.keys())}")
+                                pred_list = preds_raw.get("predictions", [])
+                            elif isinstance(preds_raw, list):
+                                pred_list = preds_raw
+                            else:
+                                pred_list = []
+                            
+                            # Buscar todas las claves que puedan contener class names
+                            for k, v in r0.items():
+                                print(f"[ROBOFLOW] Workflow key: {k} = {type(v).__name__} ({len(v) if isinstance(v, (list, dict, str)) else v})")
+                            
+                        except Exception as wf_err:
+                            print(f"[ROBOFLOW] Workflow error: {wf_err}")
+                        finally:
+                            try:
+                                if os.path.exists(temp_dummy):
+                                    os.remove(temp_dummy)
+                            except:
+                                pass
+                    
+                    # Si todavía no hay clases, intentar infer directo al modelo
+                    if not classes:
+                        try:
+                            import numpy as np
+                            dummy_img = np.zeros((50, 50, 3), dtype=np.uint8)
+                            temp_dummy2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_dummy_infer.jpg")
+                            cv2.imwrite(temp_dummy2, dummy_img)
+                            
+                            infer_result = client.infer(temp_dummy2, model_id=model_id)
+                            print(f"[ROBOFLOW] Infer result type: {type(infer_result).__name__}")
+                            
+                            # El resultado de infer suele tener predicted_classes o class en las predictions
+                            if isinstance(infer_result, dict):
+                                for k in ['predicted_classes', 'class_names', 'classes']:
+                                    if k in infer_result:
+                                        val = infer_result[k]
+                                        if isinstance(val, list):
+                                            classes = sorted(val)
+                                        elif isinstance(val, dict):
+                                            classes = sorted(val.keys())
+                                        if classes:
+                                            break
+                                # También revisar si existe un campo top-level con info del modelo
+                                print(f"[ROBOFLOW] Infer keys: {list(infer_result.keys()) if isinstance(infer_result, dict) else 'N/A'}")
+                            
+                            try:
+                                if os.path.exists(temp_dummy2):
+                                    os.remove(temp_dummy2)
+                            except:
+                                pass
+                        except Exception as infer_err:
+                            print(f"[ROBOFLOW] Infer error: {infer_err}")
+                    
+                    if classes:
+                        print(f"[ROBOFLOW] Classes via inference_sdk ({len(classes)}): {classes}")
+                        self._json_response({"ok": True, "classes": classes, "project": project_slug, "source": "inference_sdk"})
+                        return
+                        
+                except Exception as sdk_err:
+                    print(f"[ROBOFLOW] inference_sdk error: {sdk_err}")
+                    import traceback
+                    traceback.print_exc()
+
+                # ── Método 2: REST API (api.roboflow.com — puede no funcionar en todas las redes) ──
+                try:
+                    import urllib.request
+                    req_url = f"https://api.roboflow.com/{workspace}/{project_slug}?api_key={api_key}"
+                    print(f"[ROBOFLOW] Trying REST API: {req_url}")
                     req = urllib.request.Request(req_url)
-                    with urllib.request.urlopen(req, timeout=15) as resp:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
                         data = json.loads(resp.read().decode())
-                        classes = []
-                        # classes field in project response
                         if "classes" in data:
                             if isinstance(data["classes"], dict):
                                 classes = sorted(data["classes"].keys())
                             elif isinstance(data["classes"], list):
                                 classes = sorted(data["classes"])
-                        # Alternative: versions[].classes
-                        if not classes and "versions" in data:
-                            for v in data["versions"]:
-                                if "classes" in v:
-                                    if isinstance(v["classes"], dict):
-                                        classes = sorted(v["classes"].keys())
-                                    elif isinstance(v["classes"], list):
-                                        classes = sorted(v["classes"])
-                                    if classes:
-                                        break
-                        print(f"[ROBOFLOW] Classes from project '{project}': {classes}")
                         if classes:
-                            self._json_response({"ok": True, "classes": classes, "project": project})
+                            print(f"[ROBOFLOW] Classes via REST ({len(classes)}): {classes}")
+                            self._json_response({"ok": True, "classes": classes, "project": project_slug, "source": "rest_api"})
                             return
-                except Exception as api_err:
-                    print(f"[ROBOFLOW] API error: {api_err}")
+                except Exception as rest_err:
+                    print(f"[ROBOFLOW] REST API error: {rest_err}")
 
-                # Fallback: hardcoded known classes from CARGAR_PIEZAS
+                # ── Fallback: TODAS las 27 clases del proyecto CARGAR_PIEZAS ──
                 known_classes = [
+                    "1",
+                    "1 CUERPO MG_M2",
+                    "1 CUERPO XL",
                     "BARRA CARGA",
                     "BASTIDOR COLGADO",
-                    "CANCHO CURVO BASTIDOR",
                     "CANDENAS BASTIDOR",
+                    "CARRO MG_M2",
+                    "CARRO XL",
+                    "CESTON MASTILES",
                     "GANCHO BASTIDOR",
+                    "GANCHO CURVO BASTIDOR",
+                    "GANCHO MASTIL",
                     "M2_LARGO_STD",
                     "MASTIL COLGADO",
+                    "MASTIL INR 2W MG_M2",
+                    "MASTIL INR 3F MG_M2",
+                    "MASTIL INR MG_M2",
+                    "MASTIL MDL 3F MG_M2",
+                    "MASTIL MDL MG_M2",
+                    "MASTIL OTR 2W MG_M2",
+                    "MASTIL OTR 3F MG_M2",
+                    "MASTIL OTR MG_M2",
                     "NO HAY PIEZA CARGADA",
-                    "OTR MASTIL 1 CUERPO M2_MG",
-                    "OTR-INR MASTIL 2 CUERPO M2_MG",
                     "PALLET",
+                    "SOPORTE CADENAS MASTIL",
+                    "VIGA MASTIL",
                     "XL COMPACT",
                 ]
-                print(f"[ROBOFLOW] Using fallback classes for '{project}'")
-                self._json_response({"ok": True, "classes": known_classes, "source": "fallback", "project": project})
+                print(f"[ROBOFLOW] Using fallback classes ({len(known_classes)} clases)")
+                print(f"[ROBOFLOW] ⚠ Si faltan clases, añádelas manualmente o verifica la conexión a Roboflow")
+                self._json_response({"ok": True, "classes": known_classes, "source": "fallback", "project": project_slug})
 
             except Exception as e:
                 print(f"[ROBOFLOW CLASSES ERROR] {e}")
@@ -1435,6 +1928,347 @@ class CameraHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 print(f"[CAL ERROR] {e}")
                 self._json_response({"ok": False, "error": str(e)})
+
+        # ── /api/sam3/detect — SAM 3 Concept Segmentation on uploaded image
+        elif path == "/api/sam3/detect":
+            import traceback
+            try:
+                b64_str = params.get("image", "")
+                concepts = params.get("concepts", ["person"])
+                conf_threshold = float(params.get("confidence", 0.3))
+                do_remove = params.get("remove", False)  # If True, inpaint to remove detected objects
+                inpaint_radius = int(params.get("inpaint_radius", 5))
+
+                if not b64_str:
+                    self._json_response({"ok": False, "error": "No image provided"})
+                    return
+
+                if "," in b64_str:
+                    b64_str = b64_str.split(",")[1]
+
+                img_data = base64.b64decode(b64_str)
+                nparr = np.frombuffer(img_data, np.uint8)
+                img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                img_h, img_w = img_cv.shape[:2]
+
+                temp_path = "temp_sam3.jpg"
+                cv2.imwrite(temp_path, img_cv)
+
+                print(f"[SAM3] Running SAM3 detection: concepts={concepts}, remove={do_remove}")
+
+                concepts_list = concepts if isinstance(concepts, list) else [concepts]
+                detections_raw = _run_sam3_person_detection(temp_path, concepts=concepts_list, confidence=conf_threshold)
+
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+                output_image = None
+
+                # Map predictions to standardized format
+                predictions = detections_raw
+
+                # Map predictions to standardized format
+                detections = []
+                for pred in predictions:
+                    if isinstance(pred, dict):
+                        conf = float(pred.get("confidence", 0))
+                        if conf < conf_threshold:
+                            continue
+                        det = {
+                            "class": pred.get("class", pred.get("class_name", "person")),
+                            "confidence": conf,
+                            "x": pred.get("x", 0),
+                            "y": pred.get("y", 0),
+                            "width": pred.get("width", 0),
+                            "height": pred.get("height", 0),
+                            "detection_id": pred.get("detection_id", "sam3"),
+                        }
+                        if "points" in pred:
+                            det["points"] = pred["points"]
+                        detections.append(det)
+
+                # ── INPAINTING: Remove detected objects from image ──
+                cleaned_image_b64 = None
+                if do_remove and len(detections) > 0:
+                    mask = np.zeros((img_h, img_w), dtype=np.uint8)
+                    for det in detections:
+                        # Use segmentation polygon if available
+                        if "points" in det and isinstance(det["points"], list) and len(det["points"]) >= 3:
+                            poly_pts = []
+                            for pt in det["points"]:
+                                px = int(pt.get("x", 0))
+                                py = int(pt.get("y", 0))
+                                poly_pts.append([px, py])
+                            poly_arr = np.array(poly_pts, np.int32)
+                            cv2.fillPoly(mask, [poly_arr], 255)
+                        else:
+                            # Fallback: use bounding box
+                            cx = det.get("x", 0)
+                            cy = det.get("y", 0)
+                            w = det.get("width", 0)
+                            h = det.get("height", 0)
+                            x1 = int(cx - w / 2)
+                            y1 = int(cy - h / 2)
+                            x2 = int(cx + w / 2)
+                            y2 = int(cy + h / 2)
+                            # Clamp to image bounds
+                            x1 = max(0, x1)
+                            y1 = max(0, y1)
+                            x2 = min(img_w, x2)
+                            y2 = min(img_h, y2)
+                            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+
+                    # Dilate mask slightly for better inpainting edges
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inpaint_radius * 2 + 1, inpaint_radius * 2 + 1))
+                    mask = cv2.dilate(mask, kernel, iterations=1)
+
+                    # Inpaint using Telea algorithm (fast & good quality)
+                    cleaned = cv2.inpaint(img_cv, mask, inpaintRadius=inpaint_radius, flags=cv2.INPAINT_TELEA)
+
+                    # Encode cleaned image as base64 JPEG
+                    ret, buf = cv2.imencode('.jpg', cleaned, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    if ret:
+                        cleaned_image_b64 = "data:image/jpeg;base64," + base64.b64encode(buf).decode("utf-8")
+
+                    print(f"[SAM3] Inpainting complete: {len(detections)} objects removed")
+
+                print(f"[SAM3] {len(detections)} detections (concepts: {concepts}) | removed: {do_remove}")
+
+                response_data = {
+                    "ok": True,
+                    "detections": detections,
+                    "output_image": output_image,
+                    "predictions": detections,
+                    "image_width": img_w,
+                    "image_height": img_h,
+                    "summary": f"SAM 3: Found {len(detections)} objects for concepts: {concepts}"
+                }
+                if cleaned_image_b64:
+                    response_data["cleaned_image"] = cleaned_image_b64
+                    response_data["persons_removed"] = len(detections)
+
+                self._json_response(response_data)
+
+            except Exception as e:
+                print(f"[SAM3 ERROR] {e}")
+                print(traceback.format_exc())
+                self._json_response({"ok": False, "error": str(e)})
+
+        # ── /api/sam3/remove — SAM 3 detect + remove persons (shortcut)
+        elif path == "/api/sam3/remove":
+            import traceback
+            try:
+                b64_str = params.get("image", "")
+                concepts = params.get("concepts", ["person"])
+                conf_threshold = float(params.get("confidence", 0.3))
+                inpaint_radius = int(params.get("inpaint_radius", 5))
+                inpaint_method = params.get("method", "telea")  # "telea" or "ns" (Navier-Stokes)
+
+                if not b64_str:
+                    self._json_response({"ok": False, "error": "No image provided"})
+                    return
+
+                if "," in b64_str:
+                    b64_str = b64_str.split(",")[1]
+
+                img_data = base64.b64decode(b64_str)
+                nparr = np.frombuffer(img_data, np.uint8)
+                img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                img_h, img_w = img_cv.shape[:2]
+
+                temp_path = "temp_sam3_remove.jpg"
+                cv2.imwrite(temp_path, img_cv)
+
+                print(f"[SAM3 REMOVE] Running SAM3 detection, method={inpaint_method}")
+
+                concepts_list = concepts if isinstance(concepts, list) else [concepts]
+                detections = _run_sam3_person_detection(temp_path, concepts=concepts_list, confidence=conf_threshold)
+
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+                if len(detections) == 0:
+                    # No persons found → return original image
+                    ret, buf = cv2.imencode('.jpg', img_cv, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    orig_b64 = "data:image/jpeg;base64," + base64.b64encode(buf).decode("utf-8") if ret else None
+                    self._json_response({
+                        "ok": True,
+                        "cleaned_image": orig_b64,
+                        "persons_found": 0,
+                        "persons_removed": 0,
+                        "image_width": img_w,
+                        "image_height": img_h,
+                        "summary": "No persons detected — original image returned."
+                    })
+                    return
+
+                # Build inpainting mask from SAM 3 segmentation
+                mask = np.zeros((img_h, img_w), dtype=np.uint8)
+                for det in detections:
+                    # Prefer segmentation polygon for precise masks
+                    if "points" in det and isinstance(det["points"], list) and len(det["points"]) >= 3:
+                        poly_pts = []
+                        for pt in det["points"]:
+                            px = int(pt.get("x", 0))
+                            py = int(pt.get("y", 0))
+                            poly_pts.append([px, py])
+                        poly_arr = np.array(poly_pts, np.int32)
+                        cv2.fillPoly(mask, [poly_arr], 255)
+                    else:
+                        # Fallback: bounding box
+                        cx = float(det.get("x", 0))
+                        cy = float(det.get("y", 0))
+                        w = float(det.get("width", 0))
+                        h = float(det.get("height", 0))
+                        x1 = max(0, int(cx - w / 2))
+                        y1 = max(0, int(cy - h / 2))
+                        x2 = min(img_w, int(cx + w / 2))
+                        y2 = min(img_h, int(cy + h / 2))
+                        cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+
+                # Dilate mask for smooth edges
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inpaint_radius * 2 + 1, inpaint_radius * 2 + 1))
+                mask = cv2.dilate(mask, kernel, iterations=2)
+
+                # Apply inpainting
+                flag = cv2.INPAINT_TELEA if inpaint_method == "telea" else cv2.INPAINT_NS
+                cleaned = cv2.inpaint(img_cv, mask, inpaintRadius=inpaint_radius, flags=flag)
+
+                # Encode result
+                ret, buf = cv2.imencode('.jpg', cleaned, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                cleaned_b64 = "data:image/jpeg;base64," + base64.b64encode(buf).decode("utf-8") if ret else None
+
+                # Also encode mask for visualization
+                ret2, buf2 = cv2.imencode('.png', mask)
+                mask_b64 = "data:image/png;base64," + base64.b64encode(buf2).decode("utf-8") if ret2 else None
+
+                print(f"[SAM3 REMOVE] {len(detections)} persons removed via {inpaint_method} inpainting")
+
+                self._json_response({
+                    "ok": True,
+                    "cleaned_image": cleaned_b64,
+                    "mask_image": mask_b64,
+                    "persons_found": len(detections),
+                    "persons_removed": len(detections),
+                    "image_width": img_w,
+                    "image_height": img_h,
+                    "summary": f"SAM 3: Removed {len(detections)} person(s) from image"
+                })
+
+            except Exception as e:
+                print(f"[SAM3 REMOVE ERROR] {e}")
+                print(traceback.format_exc())
+                self._json_response({"ok": False, "error": str(e)})
+
+        # ── /api/sam3/remove-live — SAM 3 detect + remove persons from live camera
+        elif path == "/api/sam3/remove-live":
+            import traceback
+            try:
+                concepts = params.get("concepts", ["person"])
+                conf_threshold = float(params.get("confidence", 0.3))
+                inpaint_radius = int(params.get("inpaint_radius", 5))
+                inpaint_method = params.get("method", "telea")
+
+                with frame_lock:
+                    frame = current_frame.copy() if current_frame is not None else None
+
+                if frame is None:
+                    self._json_response({"ok": False, "error": "No hay frame de cámara disponible"})
+                    return
+
+                # Convert grayscale (Mono8) to BGR — SAM 3 & inpainting need 3 channels
+                if len(frame.shape) == 2 or (len(frame.shape) == 3 and frame.shape[2] == 1):
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                    print("[SAM3 REMOVE LIVE] Converted mono frame to BGR")
+
+                img_h, img_w = frame.shape[:2]
+
+                # Save frame temporarily for Roboflow workflow
+                import tempfile
+                temp_path = os.path.join(tempfile.gettempdir(), "_sam3_live_frame.jpg")
+                cv2.imwrite(temp_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+
+                print(f"[SAM3 REMOVE LIVE] Frame: {img_w}x{img_h}")
+
+                # ── Use SAM3 foundation model for person detection ──
+                concepts_list = concepts if isinstance(concepts, list) else [concepts]
+                detections = _run_sam3_person_detection(temp_path, concepts=concepts_list, confidence=conf_threshold)
+
+                # Cleanup temp file
+                try:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except:
+                    pass
+
+                print(f"[SAM3 REMOVE LIVE] SAM3: {len(detections)} person(s) detected")
+
+                if len(detections) == 0:
+                    ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    orig_b64 = "data:image/jpeg;base64," + base64.b64encode(buf).decode("utf-8") if ret else None
+                    self._json_response({
+                        "ok": True, "cleaned_image": orig_b64,
+                        "persons_found": 0, "persons_removed": 0,
+                        "image_width": img_w, "image_height": img_h,
+                        "summary": "No persons detected in live frame."
+                    })
+                    return
+
+                # Build inpainting mask from bounding boxes
+                mask = np.zeros((img_h, img_w), dtype=np.uint8)
+                for det in detections:
+                    if "points" in det and isinstance(det["points"], list) and len(det["points"]) >= 3:
+                        poly_pts = [[int(pt.get("x", 0)), int(pt.get("y", 0))] for pt in det["points"]]
+                        cv2.fillPoly(mask, [np.array(poly_pts, np.int32)], 255)
+                    else:
+                        cx, cy = float(det.get("x", 0)), float(det.get("y", 0))
+                        w, h = float(det.get("width", 0)), float(det.get("height", 0))
+                        x1, y1 = max(0, int(cx - w/2)), max(0, int(cy - h/2))
+                        x2, y2 = min(img_w, int(cx + w/2)), min(img_h, int(cy + h/2))
+                        cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inpaint_radius*2+1, inpaint_radius*2+1))
+                mask = cv2.dilate(mask, kernel, iterations=2)
+
+                flag = cv2.INPAINT_TELEA if inpaint_method == "telea" else cv2.INPAINT_NS
+                cleaned = cv2.inpaint(frame, mask, inpaintRadius=inpaint_radius, flags=flag)
+
+                ret, buf = cv2.imencode('.jpg', cleaned, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                cleaned_b64 = "data:image/jpeg;base64," + base64.b64encode(buf).decode("utf-8") if ret else None
+
+                print(f"[SAM3 REMOVE LIVE] ✔ {len(detections)} persons removed via {inpaint_method}")
+
+                self._json_response({
+                    "ok": True, "cleaned_image": cleaned_b64,
+                    "persons_found": len(detections), "persons_removed": len(detections),
+                    "image_width": img_w, "image_height": img_h,
+                    "summary": f"SAM 3 Live: Removed {len(detections)} person(s)"
+                })
+
+            except Exception as e:
+                print(f"[SAM3 LIVE ERROR] {e}")
+                print(traceback.format_exc())
+                self._json_response({"ok": False, "error": str(e)})
+
+        # ── /api/sam3/live-toggle — activar/desactivar eliminación en vivo
+        elif path == "/api/sam3/live-toggle":
+            action = params.get("action", "toggle")  # start | stop | toggle
+            with person_removal_lock:
+                is_active = person_removal_state["active"]
+
+            if action == "start" or (action == "toggle" and not is_active):
+                fill_color = params.get("fill_color", [255, 255, 255])
+                confidence = float(params.get("confidence", 0.3))
+                use_inpaint = bool(params.get("inpaint", False))
+                result = start_person_removal(fill_color=fill_color, confidence=confidence, use_inpaint=use_inpaint)
+                result["active"] = True
+                self._json_response(result)
+            elif action == "stop" or (action == "toggle" and is_active):
+                result = stop_person_removal()
+                result["active"] = False
+                self._json_response(result)
+            else:
+                self._json_response({"ok": False, "error": f"Acción no válida: {action}"})
 
         else:
             self.send_response(404)

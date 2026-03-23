@@ -32,6 +32,13 @@ const ImageMeasurement: React.FC = () => {
     const [detections, setDetections] = useState<any[]>([]);
     const [confidenceThreshold, setConfidenceThreshold] = useState(0.0);
 
+    // ── SAM 3 Person Detection ──
+    const [sam3Confidence, setSam3Confidence] = useState(0.85);
+    const [sam3Loading, setSam3Loading] = useState(false);
+    const [sam3Result, setSam3Result] = useState<string | null>(null);
+    const [sam3Active, setSam3Active] = useState(false);
+    const [sam3Detections, setSam3Detections] = useState<any[]>([]);
+
     // ── Calibración (lee de localStorage, se guarda desde la pantalla de Calibración)
     const [mmPerPx, setMmPerPx] = useState<number>(() => {
         const saved = localStorage.getItem('calibration_mmPerPx');
@@ -1345,6 +1352,153 @@ const ImageMeasurement: React.FC = () => {
                             style={styles.slider}
                         />
                     </div>
+                </div>
+
+                {/* ── SAM 3 — Detección de Personas ── */}
+                <div style={{
+                    ...styles.modeSelector,
+                    borderTop: '2px solid #7c3aed',
+                    paddingTop: 12,
+                    background: 'linear-gradient(135deg, #7c3aed10, #dc262610)',
+                    borderRadius: 8,
+                    padding: 12,
+                    border: `2px solid ${sam3Active ? '#7c3aed' : '#30363d'}`,
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <h3 style={{ margin: 0, fontSize: '14px', color: '#a78bfa' }}>🧠 SAM 3</h3>
+                        <span style={{
+                            fontSize: '9px',
+                            background: sam3Active ? '#7c3aed30' : '#30363d30',
+                            color: sam3Active ? '#a78bfa' : '#8b949e',
+                            padding: '2px 6px',
+                            borderRadius: 8,
+                            fontWeight: 700,
+                        }}>
+                            {sam3Active ? 'ACTIVO' : 'OFF'}
+                        </span>
+                    </div>
+
+                    <div style={{ fontSize: '10px', color: '#6e7681', marginTop: 2, marginBottom: 8 }}>
+                        Detecta personas automáticamente en la imagen o vídeo
+                    </div>
+
+                    <div style={{ marginBottom: 8 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                            <span style={{ fontSize: '11px', color: '#8b949e' }}>Confianza</span>
+                            <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#a78bfa' }}>{(sam3Confidence * 100).toFixed(0)}%</span>
+                        </div>
+                        <input
+                            type="range" min="0" max="1" step="0.05"
+                            value={sam3Confidence}
+                            onChange={(e) => setSam3Confidence(parseFloat(e.target.value))}
+                            style={{ ...styles.slider, accentColor: '#7c3aed' }}
+                        />
+                    </div>
+
+                    <button
+                        disabled={sam3Loading || (!imageSrc && sourceType !== 'video')}
+                        style={{
+                            width: '100%', padding: '10px 12px', fontSize: '0.8rem', fontWeight: 700, borderRadius: 6,
+                            cursor: sam3Loading ? 'wait' : 'pointer',
+                            border: `2px solid ${sam3Active ? '#ef4444' : '#7c3aed'}`, color: '#fff',
+                            background: sam3Loading
+                                ? 'linear-gradient(135deg, #7c3aed40, #6d28d940)'
+                                : sam3Active
+                                    ? 'linear-gradient(135deg, #ef4444, #dc2626)'
+                                    : 'linear-gradient(135deg, #7c3aed, #6d28d9)',
+                            opacity: ((!imageSrc && sourceType !== 'video') || sam3Loading) ? 0.5 : 1,
+                            transition: 'all 0.2s',
+                        }}
+                        onClick={async () => {
+                            if (sam3Loading) return;
+                            // Toggle: if already active, deactivate
+                            if (sam3Active) {
+                                setSam3Active(false);
+                                setSam3Result(null);
+                                // Remove SAM3 detections from the main detections
+                                setSam3Detections([]);
+                                setDetections(prev => prev.filter(d => d._sam3 !== true));
+                                return;
+                            }
+                            setSam3Loading(true);
+                            setSam3Result(null);
+                            try {
+                                // Obtener imagen — de imagen cargada o capturar frame del vídeo
+                                let imgToSend = imageSrc;
+                                if (!imgToSend && sourceType === 'video' && videoElementRef.current) {
+                                    const video = videoElementRef.current;
+                                    const tempCanvas = document.createElement('canvas');
+                                    tempCanvas.width = video.videoWidth;
+                                    tempCanvas.height = video.videoHeight;
+                                    const tCtx = tempCanvas.getContext('2d');
+                                    if (tCtx) {
+                                        tCtx.drawImage(video, 0, 0);
+                                        imgToSend = tempCanvas.toDataURL('image/jpeg', 0.85);
+                                    }
+                                }
+                                if (!imgToSend) {
+                                    setSam3Result('❌ No hay imagen ni vídeo disponible');
+                                    return;
+                                }
+                                const response = await fetch('http://localhost:8765/api/sam3/detect', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        image: imgToSend,
+                                        concepts: ['person'],
+                                        confidence: sam3Confidence,
+                                        remove: false,
+                                    }),
+                                });
+                                const data = await response.json();
+                                if (data.ok) {
+                                    const rawDets = data.detections || [];
+                                    const count = rawDets.length;
+                                    setSam3Result(`✅ ${count} persona(s) detectada(s)`);
+                                    if (count > 0) {
+                                        setSam3Active(true);
+                                        // Add SAM3 person detections to the canvas with class "PERSONA"
+                                        const personDets = rawDets.map((d: any) => ({
+                                            ...d,
+                                            class: 'PERSONA',
+                                            _sam3: true, // marker to identify SAM3 detections
+                                        }));
+                                        setSam3Detections(personDets);
+                                        // Merge with existing detections
+                                        setDetections(prev => [
+                                            ...prev.filter(d => d._sam3 !== true),
+                                            ...personDets,
+                                        ]);
+                                    } else {
+                                        setSam3Active(false);
+                                        setSam3Detections([]);
+                                    }
+                                } else {
+                                    setSam3Result(`❌ ${data.error || 'Error desconocido'}`);
+                                    setSam3Active(false);
+                                }
+                            } catch (err: any) {
+                                setSam3Result(`❌ Error: ${err.message}`);
+                                setSam3Active(false);
+                            } finally {
+                                setSam3Loading(false);
+                            }
+                        }}
+                    >
+                        {sam3Loading ? '⏳ Buscando personas...' : sam3Active ? '🛑 Desactivar SAM3' : '🧠 Activar SAM3'}
+                    </button>
+
+                    {sam3Result && (
+                        <div style={{
+                            fontSize: '11px', padding: '6px 8px', borderRadius: 6, marginTop: 6,
+                            background: sam3Result.startsWith('✅') ? '#3fb95015' : '#f8514915',
+                            border: `1px solid ${sam3Result.startsWith('✅') ? '#3fb95040' : '#f8514940'}`,
+                            color: sam3Result.startsWith('✅') ? '#3fb950' : '#f85149',
+                            wordBreak: 'break-word',
+                        }}>
+                            {sam3Result}
+                        </div>
+                    )}
                 </div>
 
                 {/* Mover Cotas toggle */}

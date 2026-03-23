@@ -157,6 +157,12 @@ export default function BaslerCamera() {
     const [recFrames, setRecFrames] = useState(0);
     const [recMsg, setRecMsg] = useState<{ ok: boolean; text: string } | null>(null);
     const [videoGallery, setVideoGallery] = useState<{ filename: string; path: string; size_mb: number; duration_s: number; time: string }[]>();
+    // ── SAM 3 — Eliminar personas en TIEMPO REAL (Live Preview) ────────────
+    const [sam3LiveActive, setSam3LiveActive] = useState(false);
+    const [sam3LiveLoading, setSam3LiveLoading] = useState(false);
+    const [sam3LiveStatus, setSam3LiveStatus] = useState<{ active: boolean; persons_found: number; fps: number; frames_processed: number; error: string } | null>(null);
+    const [sam3LiveConfidence, setSam3LiveConfidence] = useState(0.3);
+    const [sam3FillColor, setSam3FillColor] = useState('#ffffff'); // Color de relleno
     // ── Zoom / Pan ─────────────────────────────────────────────────────────────
     const [zoomLevel, setZoomLevel] = useState(1.0);
     const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
@@ -1597,6 +1603,64 @@ export default function BaslerCamera() {
         }
     };
 
+    // ── Eliminar personas EN TIEMPO REAL — Roboflow SAM3 find-people ──────────
+    const handleSam3LiveToggle = async () => {
+        setSam3LiveLoading(true);
+        try {
+            const action = sam3LiveActive ? 'stop' : 'start';
+            // Convertir color hex a BGR para OpenCV
+            const hexToBgr = (hex: string) => {
+                const r = parseInt(hex.slice(1, 3), 16);
+                const g = parseInt(hex.slice(3, 5), 16);
+                const b = parseInt(hex.slice(5, 7), 16);
+                return [b, g, r]; // BGR para OpenCV
+            };
+            const res = await fetch('http://127.0.0.1:8765/api/sam3/live-toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    action,
+                    fill_color: hexToBgr(sam3FillColor),
+                    confidence: sam3LiveConfidence,
+                }),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                setSam3LiveActive(data.active);
+                if (data.active) {
+                    log('success', '🧠 Eliminación SAM3 activada — Roboflow find-people (~1-3 FPS)');
+                } else {
+                    log('info', '🧠 Eliminación de personas DESACTIVADA');
+                    setSam3LiveStatus(null);
+                }
+            } else {
+                log('error', `🧠 Error: ${data.error}`);
+            }
+        } catch (err: any) {
+            log('error', `🧠 Excepción: ${err.message}`);
+        } finally {
+            setSam3LiveLoading(false);
+        }
+    };
+
+    // Polling del estado de eliminación de personas en vivo
+    useEffect(() => {
+        if (!sam3LiveActive) return;
+        const interval = setInterval(async () => {
+            try {
+                const res = await fetch('http://127.0.0.1:8765/api/sam3/live-status');
+                const data = await res.json();
+                setSam3LiveStatus(data);
+                // Si el backend se desactivó por sí solo (error fatal, etc.)
+                if (!data.active) {
+                    setSam3LiveActive(false);
+                    log('warn', '🧠 SAM 3: Se desactivó automáticamente');
+                }
+            } catch { /* ignore polling errors */ }
+        }, 1500);
+        return () => clearInterval(interval);
+    }, [sam3LiveActive]);
+
     // ── Zoom con rueda del ratón ────────────────────────────────────────────────
     const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
         e.preventDefault();
@@ -2746,6 +2810,123 @@ ${tlConfig.enablePersistentIp ? `
                                 {/* Aviso si no hay backend */}
                                 {!backendOk && (
                                     <div className="capture-result err">⚠ {t('needServer')}</div>
+                                )}
+
+                                {/* ═══ DIVIDER ═══ */}
+                                <div className="capture-divider" />
+
+                                {/* ═══ SECCIÓN SAM 3 — ELIMINAR PERSONAS EN TIEMPO REAL ═══ */}
+                                <div className="capture-panel-title" style={{ color: '#c4b5fd' }}>
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" strokeWidth="1.8">
+                                        <circle cx="12" cy="8" r="4" />
+                                        <path d="M5 20v-2a7 7 0 0 1 14 0v2" />
+                                        <line x1="4" y1="4" x2="20" y2="20" stroke="#ff6b6b" strokeWidth="2.5" />
+                                    </svg>
+                                    🧠 Eliminar Personas — SAM3 Roboflow
+                                </div>
+
+                                <div style={{ fontSize: '0.7rem', color: '#6b7280', marginBottom: 8, fontStyle: 'italic', padding: '4px 0' }}>
+                                    Segmentación SAM3 via Roboflow (find-people) — ~1-3 FPS, detección real de personas
+                                </div>
+
+                                <div className="capture-field">
+                                    <label>🎯 Confianza SAM3: <strong>{Math.round(sam3LiveConfidence * 100)}%</strong></label>
+                                    <input
+                                        type="range" className="basler-slider"
+                                        min={0.05} max={1.0} step={0.05}
+                                        value={sam3LiveConfidence}
+                                        onChange={e => setSam3LiveConfidence(parseFloat(e.target.value))}
+                                        disabled={sam3LiveActive}
+                                    />
+                                    <div className="slider-labels"><span>Baja (más detecciones)</span><span>Alta (más preciso)</span></div>
+                                </div>
+
+                                <div className="capture-field">
+                                    <label>🎨 Color de relleno</label>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <input
+                                            type="color"
+                                            value={sam3FillColor}
+                                            onChange={e => setSam3FillColor(e.target.value)}
+                                            disabled={sam3LiveActive}
+                                            style={{
+                                                width: 36, height: 28, border: '1px solid #30363d',
+                                                borderRadius: 4, cursor: sam3LiveActive ? 'not-allowed' : 'pointer',
+                                                background: 'transparent',
+                                            }}
+                                        />
+                                        <span style={{ fontSize: '0.75rem', color: '#8b949e' }}>
+                                            {sam3FillColor.toUpperCase()} — Las personas se rellenan con este color
+                                        </span>
+                                    </div>
+                                </div>
+
+                                <button
+                                    className={`basler-btn capture-btn ${sam3LiveLoading ? 'loading' : ''}`}
+                                    onClick={handleSam3LiveToggle}
+                                    disabled={sam3LiveLoading || !isConnected || !backendOk}
+                                    style={{
+                                        background: sam3LiveActive
+                                            ? 'linear-gradient(135deg, #dc2626, #b91c1c)'
+                                            : sam3LiveLoading
+                                                ? '#a78bfa30'
+                                                : 'linear-gradient(135deg, #7c3aed, #6d28d9)',
+                                        borderColor: sam3LiveActive ? '#ef444460' : '#a78bfa60',
+                                        color: '#fff',
+                                    }}
+                                >
+                                    {sam3LiveLoading
+                                        ? <><span className="spin">↻</span> Procesando...</>
+                                        : sam3LiveActive
+                                            ? '⏹ DETENER Eliminación en Vivo'
+                                            : '▶ ACTIVAR Eliminación en Vivo'
+                                    }
+                                </button>
+
+                                {/* Indicador de estado en vivo */}
+                                {sam3LiveActive && (
+                                    <div style={{
+                                        marginTop: 8,
+                                        padding: '10px 12px',
+                                        background: 'rgba(124, 58, 237, 0.15)',
+                                        border: '1px solid #a78bfa40',
+                                        borderRadius: 8,
+                                    }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                                            <span style={{
+                                                display: 'inline-block', width: 10, height: 10,
+                                                borderRadius: '50%', background: '#22c55e',
+                                                animation: 'pulse 1.5s ease-in-out infinite',
+                                                boxShadow: '0 0 8px #22c55e80',
+                                            }} />
+                                            <span style={{ color: '#c4b5fd', fontWeight: 700, fontSize: '0.85rem' }}>
+                                                🧠 SAM3 ROBOFLOW ACTIVO
+                                            </span>
+                                        </div>
+
+                                        {sam3LiveStatus && (
+                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px', fontSize: '0.75rem', color: '#9ca3af' }}>
+                                                <div>👤 Siluetas detectadas: <strong style={{ color: sam3LiveStatus.persons_found > 0 ? '#f97316' : '#22c55e' }}>
+                                                    {sam3LiveStatus.persons_found}
+                                                </strong></div>
+                                                <div>⚡ FPS: <strong style={{ color: '#60a5fa' }}>
+                                                    {sam3LiveStatus.fps}
+                                                </strong></div>
+                                                <div>🖼 Frames: <strong style={{ color: '#a78bfa' }}>
+                                                    {sam3LiveStatus.frames_processed}
+                                                </strong></div>
+                                                {sam3LiveStatus.error && (
+                                                    <div style={{ gridColumn: '1 / -1', color: '#f87171' }}>
+                                                        ⚠ {sam3LiveStatus.error}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        <div style={{ fontSize: '0.7rem', color: '#6b7280', marginTop: 6, fontStyle: 'italic' }}>
+                                            Contornos reales de siluetas — relleno + borde dibujado
+                                        </div>
+                                    </div>
                                 )}
 
                             </div>)}{/* /capture-panel */}
