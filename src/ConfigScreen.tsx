@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import ObjViewer from './ObjViewer';
+import { extractRAL, ralToHex } from './ralColors';
 
 // ─── Types ──────────────────────────────────────────────────────
 interface ModelSpecs {
@@ -16,6 +17,7 @@ interface VideoMapping {
     id: string;
     label: string;
     robotProgram?: string;
+    objElementName?: string;
     videoFile: string;
     videoBlobUrl?: string;
     objFile?: string;
@@ -89,6 +91,21 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                         localStorage.setItem('barcodeHistory', JSON.stringify(updated));
                         return updated;
                     });
+
+                    // Check if barcode contains a RAL code
+                    const ralCode = extractRAL(code);
+                    if (ralCode) {
+                        localStorage.setItem('lastScannedRAL', `RAL ${ralCode}`);
+                        // If 3D viewer is open, update the color in modelSpecs
+                        if (viewingObj) {
+                            setMappings(prev => prev.map(m =>
+                                m.id === viewingObj.mappingId
+                                    ? { ...m, modelSpecs: { ...m.modelSpecs, color: `RAL ${ralCode}` } }
+                                    : m
+                            ));
+                        }
+                    }
+
                     if (barcodeSound) {
                         try { new Audio('data:audio/wav;base64,UklGRl9vT19teleVBhdmVmbXQgAAAAEAABACDdAAAA').play().catch(() => {}); } catch {}
                     }
@@ -390,6 +407,24 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                         width: '100%', padding: '8px 12px', background: '#0d1117',
                                                         border: `1px solid ${map.robotProgram ? '#f0883e40' : '#30363d'}`, borderRadius: 6,
                                                         color: map.robotProgram ? '#f0883e' : '#e6edf3',
+                                                        fontSize: '0.85rem', fontWeight: 600, boxSizing: 'border-box',
+                                                    }}
+                                                />
+                                            </div>
+
+                                            {/* Object Element Name field */}
+                                            <div>
+                                                <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
+                                                    🎯 Nombre Objeto (en .obj)
+                                                </label>
+                                                <input
+                                                    type="text" value={map.objElementName || ''}
+                                                    onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, objElementName: e.target.value } : m))}
+                                                    placeholder="Ej: Puerta_Izq"
+                                                    style={{
+                                                        width: '100%', padding: '8px 12px', background: '#0d1117',
+                                                        border: `1px solid ${map.objElementName ? '#d29922' : '#30363d'}`, borderRadius: 6,
+                                                        color: map.objElementName ? '#d29922' : '#e6edf3',
                                                         fontSize: '0.85rem', fontWeight: 600, boxSizing: 'border-box',
                                                     }}
                                                 />
@@ -927,6 +962,15 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                     objUrl={viewingObj.url}
                     mtlUrl={viewingObj.mtlUrl}
                     fileName={viewingObj.fileName}
+                    objElementName={mappings.find(m => m.id === viewingObj.mappingId)?.objElementName}
+                    ralColor={(() => {
+                        const specs = mappings.find(m => m.id === viewingObj.mappingId)?.modelSpecs;
+                        if (specs?.color) {
+                            const ral = extractRAL(specs.color);
+                            if (ral) return ralToHex(ral) || undefined;
+                        }
+                        return undefined;
+                    })()}
                     modelSpecs={mappings.find(m => m.id === viewingObj.mappingId)?.modelSpecs || {}}
                     onSpecsUpdate={(specs) => {
                         setMappings(prev => prev.map(m =>

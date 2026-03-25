@@ -17,14 +17,17 @@ interface ObjViewerProps {
     objUrl: string;
     mtlUrl?: string;
     fileName: string;
+    objElementName?: string;
+    ralColor?: string;
     modelSpecs?: ModelSpecs;
     onSpecsUpdate?: (specs: ModelSpecs) => void;
     onClose: () => void;
 }
 
-const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, modelSpecs = {}, onSpecsUpdate, onClose }) => {
+const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, objElementName, ralColor, modelSpecs = {}, onSpecsUpdate, onClose }) => {
     const mountRef = useRef<HTMLDivElement>(null);
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+    const sceneRef = useRef<THREE.Scene | null>(null);
     const animFrameRef = useRef<number>(0);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -39,6 +42,7 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, modelSp
         // ─── Scene setup ───
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x1a1a2e);
+        sceneRef.current = scene;
 
 
 
@@ -267,6 +271,36 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, modelSp
             }
         };
     }, [objUrl, mtlUrl]);
+
+    // ─── Apply RAL color to named object ───
+    useEffect(() => {
+        if (!ralColor || !sceneRef.current) return;
+        const color = new THREE.Color(ralColor);
+        const targetName = objElementName?.trim().toLowerCase();
+
+        sceneRef.current.traverse((child) => {
+            if (!(child as THREE.Mesh).isMesh) return;
+            const mesh = child as THREE.Mesh;
+
+            // If objElementName is specified, match by name; otherwise color all meshes
+            if (targetName) {
+                const meshName = (mesh.name || mesh.parent?.name || '').toLowerCase();
+                if (!meshName.includes(targetName)) return;
+            }
+
+            // Clone material to avoid shared references, apply color
+            if (Array.isArray(mesh.material)) {
+                mesh.material = mesh.material.map(m => {
+                    const cloned = m.clone();
+                    (cloned as THREE.MeshPhongMaterial).color = color;
+                    return cloned;
+                });
+            } else {
+                mesh.material = (mesh.material as THREE.Material).clone();
+                (mesh.material as THREE.MeshPhongMaterial).color = color;
+            }
+        });
+    }, [ralColor, objElementName]);
 
     // Close on Escape key
     useEffect(() => {

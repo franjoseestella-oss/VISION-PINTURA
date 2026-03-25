@@ -35,6 +35,7 @@ interface VideoMapping {
   id: string;
   label: string;
   robotProgram?: string;
+  objElementName?: string;
   videoFile: string;
   videoBlobUrl?: string;
   objFile?: string;
