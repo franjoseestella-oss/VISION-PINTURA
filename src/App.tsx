@@ -28,6 +28,8 @@ interface VideoMapping {
   videoBlobUrl?: string; // Uploaded video blob URL
   objFile?: string;      // .obj 3D model filename
   objBlobUrl?: string;   // .obj blob URL for download/preview
+  mtlFile?: string;      // .mtl material filename
+  mtlBlobUrl?: string;   // .mtl blob URL
 }
 
 interface ChatMessage {
@@ -304,6 +306,14 @@ function App() {
     const blobUrl = URL.createObjectURL(file);
     setMappings(prev => prev.map(m =>
       m.id === mappingId ? { ...m, objFile: file.name, objBlobUrl: blobUrl } : m
+    ));
+  };
+
+  // ── Upload an .mtl file for a specific mapping ──
+  const handleMappingMtlUpload = (mappingId: string, file: File) => {
+    const blobUrl = URL.createObjectURL(file);
+    setMappings(prev => prev.map(m =>
+      m.id === mappingId ? { ...m, mtlFile: file.name, mtlBlobUrl: blobUrl } : m
     ));
   };
 
@@ -708,7 +718,7 @@ function App() {
           <PlcConfig />
 
         ) : activeTab === 'config' ? (
-          <ConfigScreen mappings={mappings} setMappings={setMappings} onMappingVideoUpload={handleMappingVideoUpload} onMappingObjUpload={handleMappingObjUpload} />
+          <ConfigScreen mappings={mappings} setMappings={setMappings} onMappingVideoUpload={handleMappingVideoUpload} onMappingObjUpload={handleMappingObjUpload} onMappingMtlUpload={handleMappingMtlUpload} />
         ) : activeTab === 'chat' ? (
           <div className="chat-container">
             <div className="chat-header">

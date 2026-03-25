@@ -9,6 +9,8 @@ interface VideoMapping {
     videoBlobUrl?: string;
     objFile?: string;
     objBlobUrl?: string;
+    mtlFile?: string;
+    mtlBlobUrl?: string;
 }
 
 interface TrackTolerance {
@@ -25,14 +27,15 @@ interface ConfigScreenProps {
     setMappings: React.Dispatch<React.SetStateAction<VideoMapping[]>>;
     onMappingVideoUpload?: (mappingId: string, file: File) => void;
     onMappingObjUpload?: (mappingId: string, file: File) => void;
+    onMappingMtlUpload?: (mappingId: string, file: File) => void;
 }
 
 // ─── Sub-tab type ───────────────────────────────────────────────
 type ConfigTab = 'videoMapping' | 'tolerancias';
 
-const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMappingVideoUpload, onMappingObjUpload }) => {
+const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMappingVideoUpload, onMappingObjUpload, onMappingMtlUpload }) => {
     const [configTab, setConfigTab] = useState<ConfigTab>('tolerancias');
-    const [viewingObj, setViewingObj] = useState<{ url: string; fileName: string } | null>(null);
+    const [viewingObj, setViewingObj] = useState<{ url: string; fileName: string; mtlUrl?: string } | null>(null);
 
     // ═══ TOLERANCIAS TRACKING STATE ═══
     const [tolerances, setTolerances] = useState<TrackTolerance[]>(() => {
@@ -398,12 +401,15 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                 {map.objBlobUrl && (
                                                     <div style={{
                                                         marginTop: 6, padding: '6px 10px', background: '#1f6feb15', border: '1px solid #1f6feb40',
-                                                        borderRadius: 6, display: 'flex', alignItems: 'center', gap: 8,
+                                                        borderRadius: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
                                                     }}>
                                                         <span style={{ color: '#58a6ff', fontSize: '0.72rem', fontWeight: 700 }}>✓ Modelo .obj cargado</span>
                                                         <span style={{ fontSize: '0.68rem', color: '#8b949e' }}>{map.objFile}</span>
+                                                        {map.mtlBlobUrl && (
+                                                            <span style={{ fontSize: '0.68rem', color: '#3fb950', fontWeight: 600 }}>✓ .mtl</span>
+                                                        )}
                                                         <button
-                                                            onClick={() => setViewingObj({ url: map.objBlobUrl!, fileName: map.objFile || '.obj' })}
+                                                            onClick={() => setViewingObj({ url: map.objBlobUrl!, fileName: map.objFile || '.obj', mtlUrl: map.mtlBlobUrl })}
                                                             style={{
                                                                 marginLeft: 'auto',
                                                                 padding: '4px 14px',
@@ -427,6 +433,43 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                         </button>
                                                     </div>
                                                 )}
+
+                                                {/* MTL Material file field */}
+                                                <div style={{ marginTop: 6 }}>
+                                                    <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
+                                                        🎨 Material (.mtl) — opcional
+                                                    </label>
+                                                    <div style={{ display: 'flex', gap: 6 }}>
+                                                        <input
+                                                            type="text" value={map.mtlFile || ''}
+                                                            placeholder="Selecciona un archivo .mtl..."
+                                                            readOnly
+                                                            style={{
+                                                                flex: 1, padding: '8px 12px', background: '#0d1117',
+                                                                border: `1px solid ${map.mtlBlobUrl ? '#238636' : '#30363d'}`, borderRadius: 6,
+                                                                color: map.mtlBlobUrl ? '#3fb950' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
+                                                                cursor: 'default',
+                                                            }}
+                                                        />
+                                                        <label style={{
+                                                            padding: '8px 14px', background: 'linear-gradient(135deg, #238636, #2ea043)', color: '#fff', borderRadius: 6,
+                                                            cursor: 'pointer', fontWeight: 600, fontSize: '0.78rem', display: 'flex',
+                                                            alignItems: 'center', gap: 4, whiteSpace: 'nowrap', flexShrink: 0,
+                                                        }}>
+                                                            📁 Subir .mtl
+                                                            <input
+                                                                type="file" accept=".mtl,.MTL"
+                                                                style={{ display: 'none' }}
+                                                                onChange={(e) => {
+                                                                    const file = e.target.files?.[0];
+                                                                    if (file && onMappingMtlUpload) {
+                                                                        onMappingMtlUpload(map.id, file);
+                                                                    }
+                                                                }}
+                                                            />
+                                                        </label>
+                                                    </div>
+                                                </div>
                                             </div>
 
                                             {/* Delete button */}
@@ -626,6 +669,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
             {viewingObj && (
                 <ObjViewer
                     objUrl={viewingObj.url}
+                    mtlUrl={viewingObj.mtlUrl}
                     fileName={viewingObj.fileName}
                     onClose={() => setViewingObj(null)}
                 />

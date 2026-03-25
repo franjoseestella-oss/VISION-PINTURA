@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
 
 interface ObjViewerProps {
     objUrl: string;
+    mtlUrl?: string;
     fileName: string;
     onClose: () => void;
 }
 
-const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, fileName, onClose }) => {
+const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, onClose }) => {
     const mountRef = useRef<HTMLDivElement>(null);
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
     const animFrameRef = useRef<number>(0);
@@ -60,46 +62,94 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, fileName, onClose }) => {
         pointLight.position.set(0, 5, 0);
         scene.add(pointLight);
 
-        // ─── Load OBJ ───
-        const loader = new OBJLoader();
-        loader.load(
-            objUrl,
-            (obj) => {
-                // Apply a nice material to all meshes
-                const material = new THREE.MeshPhongMaterial({
-                    color: 0x58a6ff,
-                    specular: 0x444444,
-                    shininess: 60,
-                    flatShading: false,
-                });
+        // ─── Load OBJ (with optional MTL) ───
+        const addModelToScene = (obj: THREE.Group) => {
+            // Center and scale model
+            const box = new THREE.Box3().setFromObject(obj);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const scale = 4 / maxDim;
+            obj.scale.setScalar(scale);
+            obj.position.sub(center.multiplyScalar(scale));
 
-                obj.traverse((child) => {
-                    if ((child as THREE.Mesh).isMesh) {
-                        (child as THREE.Mesh).material = material;
-                        (child as THREE.Mesh).castShadow = true;
-                        (child as THREE.Mesh).receiveShadow = true;
-                    }
-                });
+            // Enable shadows on all meshes
+            obj.traverse((child) => {
+                if ((child as THREE.Mesh).isMesh) {
+                    (child as THREE.Mesh).castShadow = true;
+                    (child as THREE.Mesh).receiveShadow = true;
+                }
+            });
 
-                // Center and scale model
-                const box = new THREE.Box3().setFromObject(obj);
-                const center = box.getCenter(new THREE.Vector3());
-                const size = box.getSize(new THREE.Vector3());
-                const maxDim = Math.max(size.x, size.y, size.z);
-                const scale = 4 / maxDim;
-                obj.scale.setScalar(scale);
-                obj.position.sub(center.multiplyScalar(scale));
+            scene.add(obj);
+            setLoading(false);
+        };
 
-                scene.add(obj);
-                setLoading(false);
-            },
-            undefined,
-            (err) => {
-                console.error('Error loading OBJ:', err);
-                setError('Error cargando el archivo .obj');
-                setLoading(false);
-            }
-        );
+        const applyDefaultMaterial = (obj: THREE.Group) => {
+            const material = new THREE.MeshPhongMaterial({
+                color: 0x58a6ff,
+                specular: 0x444444,
+                shininess: 60,
+                flatShading: false,
+            });
+            obj.traverse((child) => {
+                if ((child as THREE.Mesh).isMesh) {
+                    (child as THREE.Mesh).material = material;
+                }
+            });
+        };
+
+        const onObjError = (err: unknown) => {
+            console.error('Error loading OBJ:', err);
+            setError('Error cargando el archivo .obj');
+            setLoading(false);
+        };
+
+        if (mtlUrl) {
+            // Load MTL first, then OBJ with materials
+            const mtlLoader = new MTLLoader();
+            mtlLoader.load(
+                mtlUrl,
+                (materials) => {
+                    materials.preload();
+                    const objLoader = new OBJLoader();
+                    objLoader.setMaterials(materials);
+                    objLoader.load(
+                        objUrl,
+                        (obj) => addModelToScene(obj),
+                        undefined,
+                        onObjError
+                    );
+                },
+                undefined,
+                (mtlErr) => {
+                    console.warn('MTL load failed, falling back to default material:', mtlErr);
+                    // Fallback: load OBJ without MTL
+                    const objLoader = new OBJLoader();
+                    objLoader.load(
+                        objUrl,
+                        (obj) => {
+                            applyDefaultMaterial(obj);
+                            addModelToScene(obj);
+                        },
+                        undefined,
+                        onObjError
+                    );
+                }
+            );
+        } else {
+            // No MTL: load OBJ with default material
+            const objLoader = new OBJLoader();
+            objLoader.load(
+                objUrl,
+                (obj) => {
+                    applyDefaultMaterial(obj);
+                    addModelToScene(obj);
+                },
+                undefined,
+                onObjError
+            );
+        }
 
         // ─── Mouse orbit controls (simple) ───
         let isDragging = false;
@@ -203,7 +253,7 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, fileName, onClose }) => {
                 container.removeChild(renderer.domElement);
             }
         };
-    }, [objUrl]);
+    }, [objUrl, mtlUrl]);
 
     // Close on Escape key
     useEffect(() => {
