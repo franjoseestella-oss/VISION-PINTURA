@@ -25,9 +25,7 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, onClose
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x1a1a2e);
 
-        // Grid helper
-        const gridHelper = new THREE.GridHelper(20, 20, 0x30363d, 0x21262d);
-        scene.add(gridHelper);
+
 
         // Camera
         const width = container.clientWidth;
@@ -281,8 +279,8 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, onClose
             <div style={{
                 position: 'fixed', top: '50%', left: '50%',
                 transform: 'translate(-50%, -50%)',
-                width: '80vw', maxWidth: 1100,
-                height: '75vh', maxHeight: 800,
+                width: '95vw', maxWidth: 1600,
+                height: '92vh', maxHeight: 1100,
                 zIndex: 10001,
                 background: '#0d1117',
                 border: '1px solid #30363d',
