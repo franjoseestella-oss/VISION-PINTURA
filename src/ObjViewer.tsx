@@ -28,6 +28,9 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, modelSp
     const animFrameRef = useRef<number>(0);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [panelPos, setPanelPos] = useState({ x: 20, y: 20 });
+    const draggingPanel = useRef(false);
+    const dragOffset = useRef({ x: 0, y: 0 });
 
     useEffect(() => {
         const container = mountRef.current;
@@ -369,24 +372,52 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, modelSp
                             onMouseDown={(e) => e.stopPropagation()}
                             style={{
                                 position: 'absolute',
-                                top: 20,
-                                left: 20,
-                                bottom: 20,
+                                top: panelPos.y,
+                                left: panelPos.x,
                                 zIndex: 10,
                                 background: 'rgba(13,17,23,0.94)',
                                 border: '1px solid #30363d',
                                 borderRadius: 14,
-                                padding: '24px 28px',
+                                padding: '0 28px 24px 28px',
                                 backdropFilter: 'blur(12px)',
                                 width: 520,
+                                maxHeight: 'calc(100% - 40px)',
                                 boxShadow: '0 16px 64px rgba(0,0,0,0.7)',
                                 display: 'flex',
                                 flexDirection: 'column',
                                 overflow: 'auto',
                             }}
                         >
-                            <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#8b949e', marginBottom: 18, textTransform: 'uppercase', letterSpacing: 1.5 }}>
-                                📋 Especificaciones
+                            {/* Drag handle */}
+                            <div
+                                style={{
+                                    padding: '14px 0', cursor: 'grab', userSelect: 'none',
+                                    display: 'flex', alignItems: 'center', gap: 10,
+                                    borderBottom: '1px solid #21262d', marginBottom: 14,
+                                    position: 'sticky', top: 0,
+                                    background: 'rgba(13,17,23,0.98)', zIndex: 2,
+                                }}
+                                onMouseDown={(e) => {
+                                    draggingPanel.current = true;
+                                    dragOffset.current = { x: e.clientX - panelPos.x, y: e.clientY - panelPos.y };
+                                    e.currentTarget.style.cursor = 'grabbing';
+                                    const onMove = (ev: MouseEvent) => {
+                                        if (!draggingPanel.current) return;
+                                        setPanelPos({ x: ev.clientX - dragOffset.current.x, y: ev.clientY - dragOffset.current.y });
+                                    };
+                                    const onUp = () => {
+                                        draggingPanel.current = false;
+                                        document.removeEventListener('mousemove', onMove);
+                                        document.removeEventListener('mouseup', onUp);
+                                    };
+                                    document.addEventListener('mousemove', onMove);
+                                    document.addEventListener('mouseup', onUp);
+                                }}
+                            >
+                                <span style={{ fontSize: '1.1rem' }}>⠿</span>
+                                <span style={{ fontSize: '1.1rem', fontWeight: 700, color: '#8b949e', textTransform: 'uppercase', letterSpacing: 1.5 }}>
+                                    📋 Especificaciones
+                                </span>
                             </div>
                             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                                 <tbody>
