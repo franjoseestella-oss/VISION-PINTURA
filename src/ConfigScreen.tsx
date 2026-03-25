@@ -207,7 +207,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
             {/* Sub-tabs */}
             <div style={{ display: 'flex', borderBottom: '1px solid #30363d', background: '#161b22', paddingLeft: 16 }}>
                 <button style={tabStyle(configTab === 'videoMapping')} onClick={() => setConfigTab('videoMapping')}>
-                    🎬 Video Mapping
+                    🏷️ Configurar Etiquetas
                 </button>
                 <button style={tabStyle(configTab === 'tolerancias')} onClick={() => setConfigTab('tolerancias')}>
                     📐 Tolerancias Tracking
@@ -222,9 +222,9 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                 {configTab === 'videoMapping' ? (
                     /* ═══ VIDEO MAPPING ═══ */
                     <div>
-                        <h2 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: 8, color: '#fff' }}>🎬 Video Mapping Configuration</h2>
+                        <h2 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: 8, color: '#fff' }}>🏷️ Configurar Etiquetas</h2>
                         <p style={{ fontSize: '0.82rem', color: '#8b949e', marginBottom: 16 }}>
-                            Asocia cada etiqueta activa a un archivo de vídeo. Importa las etiquetas desde Tolerancias Tracking automáticamente.
+                            Configura cada etiqueta activa con su programa robot, vídeo y modelo 3D. Importa las etiquetas desde Tolerancias Tracking automáticamente.
                         </p>
 
                         {/* Action bar */}
