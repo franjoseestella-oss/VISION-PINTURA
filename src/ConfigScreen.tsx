@@ -891,23 +891,45 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                         </div>
 
                         {/* Último escaneo destacado */}
-                        {barcodeHistory.length > 0 && (
-                            <div style={{
-                                padding: '20px 24px', marginBottom: 20,
-                                background: 'linear-gradient(135deg, #0d1117, #161b22)',
-                                border: '2px solid #1f6feb',
-                                borderRadius: 12,
-                                boxShadow: '0 0 20px rgba(31,111,235,0.15)',
-                            }}>
-                                <div style={{ fontSize: '0.72rem', color: '#58a6ff', fontWeight: 700, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>Último código escaneado</div>
-                                <div style={{ fontSize: '1.8rem', fontWeight: 700, color: '#fff', fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                                    {barcodeHistory[0].code}
+                        {barcodeHistory.length > 0 && (() => {
+                            const lastCode = barcodeHistory[0].code;
+                            const ralCode = extractRAL(lastCode);
+                            const hexColor = ralCode ? ralToHex(`RAL ${ralCode}`) : null;
+                            return (
+                                <div style={{
+                                    padding: '20px 24px', marginBottom: 20,
+                                    background: 'linear-gradient(135deg, #0d1117, #161b22)',
+                                    border: '2px solid #1f6feb',
+                                    borderRadius: 12,
+                                    boxShadow: '0 0 20px rgba(31,111,235,0.15)',
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                }}>
+                                    <div>
+                                        <div style={{ fontSize: '0.72rem', color: '#58a6ff', fontWeight: 700, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>Último código escaneado</div>
+                                        <div style={{ fontSize: '1.8rem', fontWeight: 700, color: '#fff', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                                            {lastCode}
+                                        </div>
+                                        <div style={{ fontSize: '0.72rem', color: '#8b949e', marginTop: 6 }}>
+                                            {barcodeHistory[0].timestamp}
+                                        </div>
+                                    </div>
+                                    {hexColor && (
+                                        <div style={{
+                                            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+                                            padding: '12px', background: '#0d1117', border: '1px solid #30363d', borderRadius: 8
+                                        }}>
+                                            <div style={{
+                                                width: 60, height: 60, borderRadius: 8, background: hexColor,
+                                                boxShadow: '0 0 10px rgba(0,0,0,0.5)', border: '2px solid #30363d'
+                                            }} />
+                                            <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#e6edf3' }}>RAL {ralCode}</div>
+                                        </div>
+                                    )}
                                 </div>
-                                <div style={{ fontSize: '0.72rem', color: '#8b949e', marginTop: 6 }}>
-                                    {barcodeHistory[0].timestamp}
-                                </div>
-                            </div>
-                        )}
+                            );
+                        })()}
 
                         {/* Historial */}
                         <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
