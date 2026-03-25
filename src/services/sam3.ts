@@ -7,6 +7,10 @@
  *   2. Creates a binary mask from the segmentation polygons
  *   3. OpenCV inpaints (fills) the masked areas with surrounding background
  *   4. Returns the cleaned image without persons
+ *
+ * Workflows disponibles:
+ *   - playground-seg-preview-od (NUEVO): segmentación dinámica con clases custom
+ *   - find-people-and-forklifts (LEGACY): detección workers/forklifts
  */
 
 const BACKEND_URL = "http://localhost:8765";
@@ -127,6 +131,7 @@ export const removeConceptsLive = async (
 
 /**
  * Detect concepts (without removal) — also supports optional inpainting via `remove` flag
+ * Uses the new playground-seg-preview-od workflow with dynamic class support
  */
 export const detectConcepts = async (
     base64Image: string,
@@ -163,3 +168,101 @@ export const detectConcepts = async (
         };
     }
 };
+
+/**
+ * Segment specific classes using the playground-seg-preview-od workflow
+ * This is the new primary workflow that accepts dynamic class prompts
+ * 
+ * @param base64Image - The image as base64 data URL or raw base64
+ * @param classes - Array of class names to detect (e.g. ["BARRA CARGA", "MASTIL OTR MG_M2"])
+ * @param confidenceThreshold - Minimum confidence (0.0-1.0)
+ * @param remove - If true, also inpaint/remove detected objects
+ */
+export const segmentClasses = async (
+    base64Image: string,
+    classes: string[],
+    confidenceThreshold: number = 0.3,
+    remove: boolean = false
+): Promise<Sam3DetectResult> => {
+    try {
+        console.log(`[SAM3 Segment] Detecting classes: ${classes.join(", ")}`);
+        const response = await fetch(`${BACKEND_URL}/api/sam3/detect`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                image: base64Image,
+                concepts: classes,
+                confidence: confidenceThreshold,
+                remove,
+            }),
+        });
+
+        if (!response.ok) {
+            throw new Error(`Server error: ${response.status} ${response.statusText}`);
+        }
+
+        return await response.json();
+    } catch (error: any) {
+        console.error("[SAM3 Segment] Error:", error);
+        return {
+            ok: false,
+            detections: [],
+            image_width: 0,
+            image_height: 0,
+            summary: `SAM 3 Segment Error: ${error.message}`,
+            error: error.message,
+        };
+    }
+};
+
+/**
+ * Toggle live person removal (SAM3 continuous detection)
+ * @param action - "start" | "stop" | "toggle"
+ * @param concepts - Classes to detect in live mode
+ * @param confidence - Minimum confidence threshold
+ * @param useInpaint - If true, use inpainting instead of fill color
+ */
+export const toggleLiveRemoval = async (
+    action: "start" | "stop" | "toggle" = "toggle",
+    concepts: string[] = ["person"],
+    confidence: number = 0.3,
+    useInpaint: boolean = false,
+    fillColor: number[] = [255, 255, 255]
+): Promise<{ ok: boolean; active: boolean; error?: string }> => {
+    try {
+        const response = await fetch(`${BACKEND_URL}/api/sam3/live-toggle`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                action,
+                concepts,
+                confidence,
+                inpaint: useInpaint,
+                fill_color: fillColor,
+            }),
+        });
+
+        if (!response.ok) {
+            throw new Error(`Server error: ${response.status} ${response.statusText}`);
+        }
+
+        return await response.json();
+    } catch (error: any) {
+        console.error("[SAM3 Live Toggle] Error:", error);
+        return { ok: false, active: false, error: error.message };
+    }
+};
+
+/**
+ * Get live SAM3 removal status
+ */
+export const getLiveStatus = async (): Promise<Record<string, any>> => {
+    try {
+        const response = await fetch(`${BACKEND_URL}/api/sam3/live-status`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.json();
+    } catch (error: any) {
+        return { active: false, error: error.message };
+    }
+};
+

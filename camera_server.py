@@ -150,122 +150,342 @@ processed_frame = None          # Frame con personas eliminadas
 processed_frame_lock = threading.Lock()
 _person_removal_thread = None
 
+# ── HOG Person Detector (singleton, loaded once) ─────────────────────────────
+_hog_detector = None
 
-def _run_sam3_person_detection(image_path, concepts=None, confidence=0.3):
-    """Detecta personas usando el workflow de Roboflow 'find-workers-and-forklifts'.
+def _get_hog_detector():
+    """Returns a shared HOG person detector instance (created once)."""
+    global _hog_detector
+    if _hog_detector is None:
+        _hog_detector = cv2.HOGDescriptor()
+        _hog_detector.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        print("[HOG] Person detector initialized")
+    return _hog_detector
+
+
+def _fast_person_detection(image_data, confidence=0.3):
+    """Ultra-fast local person detection using OpenCV HOG descriptor.
     
-    Usa inference_sdk InferenceHTTPClient para llamar al workflow.
-    API: https://detect.roboflow.com
-    Workspace: welding-hqci3
+    Runs entirely locally — no API calls, ~30-80ms per frame.
     
     Args:
-        image_path: Ruta al archivo de imagen temporal
-        concepts: Lista de conceptos a filtrar (default: ['person'])
-        confidence: Umbral de confianza mínimo (0.0-1.0)
+        image_data: numpy array (BGR) or file path string
+        confidence: minimum confidence threshold (HOG weight)
     
     Returns:
-        Lista de detecciones filtradas por confianza con class forzado a "person"
+        List of detection dicts with class, confidence, x, y, width, height
     """
-    if concepts is None:
-        concepts = ['person']
+    import time
+    t0 = time.time()
     
-    from inference_sdk import InferenceHTTPClient
+    if isinstance(image_data, str):
+        img = cv2.imread(image_data)
+    else:
+        img = image_data
     
-    API_KEY = "K6YHioHqtuwbsNmR2n7O"
-    WORKSPACE = "welding-hqci3"
-    WORKFLOW_ID = "find-people-and-forklifts"
+    if img is None:
+        return []
     
-    print(f"[SAM3 DETECT] Workflow={WORKFLOW_ID}, image={image_path}, conf={confidence}")
+    h, w = img.shape[:2]
+    
+    # Convert grayscale to BGR if needed
+    if len(img.shape) == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    
+    # Aggressive downscale for speed (320px wide)
+    MAX_W = 320
+    scale = 1.0
+    if w > MAX_W:
+        scale = MAX_W / w
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        img_small = cv2.resize(img, (new_w, new_h))
+    else:
+        img_small = img
+    
+    hog = _get_hog_detector()
+    
+    # Detect people
+    rects, weights = hog.detectMultiScale(
+        img_small,
+        winStride=(8, 8),
+        padding=(4, 4),
+        scale=1.05,
+        useMeanshiftGrouping=False
+    )
+    
+    if len(rects) == 0:
+        elapsed = (time.time() - t0) * 1000
+        print(f"[HOG] 0 persons detected ({elapsed:.0f}ms)")
+        return []
+    
+    # Non-maximum suppression to remove overlapping boxes
+    boxes = []
+    scores = []
+    for (x, y, bw, bh), weight in zip(rects, weights):
+        conf = float(weight)
+        if conf < confidence:
+            continue
+        boxes.append([int(x), int(y), int(x + bw), int(y + bh)])
+        scores.append(conf)
+    
+    if len(boxes) == 0:
+        elapsed = (time.time() - t0) * 1000
+        print(f"[HOG] 0 persons above threshold ({elapsed:.0f}ms)")
+        return []
+    
+    # Apply NMS
+    indices = cv2.dnn.NMSBoxes(
+        [(b[0], b[1], b[2] - b[0], b[3] - b[1]) for b in boxes],
+        scores,
+        score_threshold=confidence,
+        nms_threshold=0.4
+    )
+    
+    detections = []
+    if len(indices) > 0:
+        # Handle both old and new OpenCV NMSBoxes return format
+        idx_list = indices.flatten() if hasattr(indices, 'flatten') else indices
+        for i in idx_list:
+            x1, y1, x2, y2 = boxes[i]
+            conf = scores[i]
+            # Scale back to original resolution
+            ox1 = x1 / scale
+            oy1 = y1 / scale
+            ox2 = x2 / scale
+            oy2 = y2 / scale
+            obw = ox2 - ox1
+            obh = oy2 - oy1
+            cx = ox1 + obw / 2
+            cy = oy1 + obh / 2
+            detections.append({
+                "class": "person",
+                "confidence": min(conf, 1.0),
+                "x": cx,
+                "y": cy,
+                "width": obw,
+                "height": obh,
+                "detection_id": f"hog_{i}"
+            })
+    
+    elapsed = (time.time() - t0) * 1000
+    print(f"[HOG] {len(detections)} persons detected ({elapsed:.0f}ms)")
+    return detections
+
+
+# ── OpenCV Person Tracker (fast frame-to-frame tracking) ─────────────────────
+_tracker_state = {
+    'initialized': False,
+    'trackers': [],        # list of cv2.Tracker objects
+    'boxes': [],           # list of (x,y,w,h) in original coords
+    'classes': [],         # class names for each tracked object
+    'confidences': [],     # confidence for each tracked object
+    'last_detect_time': 0,
+    'redetect_interval': 15,  # re-detect with SAM3 every N seconds
+}
+
+
+def _init_trackers(img_cv, detections):
+    """Initialize OpenCV trackers from SAM3 detections."""
+    global _tracker_state
+    _tracker_state['trackers'] = []
+    _tracker_state['boxes'] = []
+    _tracker_state['classes'] = []
+    _tracker_state['confidences'] = []
+    
+    h, w = img_cv.shape[:2]
+    
+    for det in detections:
+        cx = float(det.get('x', 0))
+        cy = float(det.get('y', 0))
+        bw = float(det.get('width', 0))
+        bh = float(det.get('height', 0))
+        
+        # Convert center coords to top-left
+        x1 = int(cx - bw / 2)
+        y1 = int(cy - bh / 2)
+        bw_i = int(bw)
+        bh_i = int(bh)
+        
+        # Clamp to image bounds
+        x1 = max(0, min(x1, w - 1))
+        y1 = max(0, min(y1, h - 1))
+        bw_i = min(bw_i, w - x1)
+        bh_i = min(bh_i, h - y1)
+        
+        if bw_i < 10 or bh_i < 10:
+            continue
+        
+        bbox = (x1, y1, bw_i, bh_i)
+        
+        # Use CSRT tracker (accurate) or KCF (faster)
+        try:
+            tracker = cv2.TrackerCSRT_create()
+        except AttributeError:
+            try:
+                tracker = cv2.legacy.TrackerCSRT_create()
+            except:
+                try:
+                    tracker = cv2.TrackerKCF_create()
+                except:
+                    tracker = cv2.legacy.TrackerKCF_create()
+        
+        tracker.init(img_cv, bbox)
+        _tracker_state['trackers'].append(tracker)
+        _tracker_state['boxes'].append(bbox)
+        _tracker_state['classes'].append(det.get('class', 'person'))
+        _tracker_state['confidences'].append(float(det.get('confidence', 0.9)))
+    
+    _tracker_state['initialized'] = True
+    _tracker_state['last_detect_time'] = time.time()
+    print(f"[TRACKER] Initialized {len(_tracker_state['trackers'])} trackers")
+
+
+def _track_frame(img_cv):
+    """Update trackers with new frame. Very fast (~5-20ms).
+    
+    Returns list of detection dicts with updated positions.
+    """
+    import time as _time
+    t0 = _time.time()
+    
+    if not _tracker_state['initialized'] or len(_tracker_state['trackers']) == 0:
+        return []
+    
+    detections = []
+    alive_trackers = []
+    alive_boxes = []
+    alive_classes = []
+    alive_confs = []
+    
+    for i, tracker in enumerate(_tracker_state['trackers']):
+        success, bbox = tracker.update(img_cv)
+        if success:
+            x, y, w, h = [int(v) for v in bbox]
+            cx = x + w / 2
+            cy = y + h / 2
+            detections.append({
+                'class': _tracker_state['classes'][i],
+                'confidence': _tracker_state['confidences'][i],
+                'x': cx,
+                'y': cy,
+                'width': w,
+                'height': h,
+                'detection_id': f'track_{i}',
+            })
+            alive_trackers.append(tracker)
+            alive_boxes.append(bbox)
+            alive_classes.append(_tracker_state['classes'][i])
+            alive_confs.append(_tracker_state['confidences'][i])
+    
+    # Remove lost trackers
+    _tracker_state['trackers'] = alive_trackers
+    _tracker_state['boxes'] = alive_boxes
+    _tracker_state['classes'] = alive_classes
+    _tracker_state['confidences'] = alive_confs
+    
+    elapsed = (_time.time() - t0) * 1000
+    print(f"[TRACKER] {len(detections)} tracked ({elapsed:.0f}ms)")
+    return detections
+
+
+def _reset_trackers():
+    """Reset all trackers."""
+    global _tracker_state
+    _tracker_state['initialized'] = False
+    _tracker_state['trackers'] = []
+    _tracker_state['boxes'] = []
+    _tracker_state['classes'] = []
+    _tracker_state['confidences'] = []
+    print("[TRACKER] Reset")
+
+def _run_sam3_detection(image_path, class_names=None):
+    """Conecta con el proyecto Roboflow sam-3-2 via API REST directa.
+    (No usa inference_sdk porque no es compatible con Python 3.13)
+    """
+    if class_names is None:
+        class_names = ["person", "forklift"]
+    
+    import requests
+    import base64
+    
+    # Leer imagen y convertir a base64
+    with open(image_path, "rb") as f:
+        img_bytes = f.read()
+    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+    
+    api_key = "K6YHioHqtuwbsNmR2n7O"
+    url = "https://detect.roboflow.com/infer/workflows/welding-hqci3/sam-3-2"
+    
+    payload = {
+        "api_key": api_key,
+        "inputs": {
+            "image": {"type": "base64", "value": img_b64},
+            "className": class_names
+        }
+    }
+    
+    print(f"[SAM3] POST {url} | className={class_names} | img_size={len(img_bytes)} bytes")
     
     try:
-        client = InferenceHTTPClient(
-            api_url="https://detect.roboflow.com",
-            api_key=API_KEY
-        )
+        resp = requests.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        result = resp.json()
         
-        result_raw = client.run_workflow(
-            workspace_name=WORKSPACE,
-            workflow_id=WORKFLOW_ID,
-            images={"image": image_path},
-            use_cache=True
-        )
+        # Log completo
+        import json
+        rstr = json.dumps(result, indent=2, default=str)
+        print(f"[SAM3] Respuesta ({len(rstr)} chars):")
+        for i in range(0, min(len(rstr), 5000), 500):
+            print(rstr[i:i+500])
+        if len(rstr) > 5000:
+            print("... (truncado)")
         
-        print(f"[SAM3 DETECT] Resultado raw tipo={type(result_raw).__name__}")
-        
-        # Serializar de forma segura (por si hay objetos numpy, etc.)
-        def to_json(obj):
-            if obj is None: return None
-            if isinstance(obj, (str, int, float, bool)): return obj
-            if isinstance(obj, dict): return {k: to_json(v) for k, v in obj.items()}
-            if isinstance(obj, list): return [to_json(v) for v in obj]
-            if hasattr(obj, 'tolist'): return obj.tolist()  # numpy
-            if hasattr(obj, '__dict__'): return to_json(obj.__dict__)
-            try:
-                import json; json.dumps(obj); return obj
-            except: return str(obj)
-        
-        result = to_json(result_raw)
-        
-        # result es lista: [{count_objects, output_image, predictions:{image, predictions:[...]}}]
-        r0 = result[0] if (isinstance(result, list) and len(result) > 0) else {}
-        
-        count = r0.get("count_objects", 0)
-        print(f"[SAM3 DETECT] Workflow devolvió: count_objects={count}, keys={list(r0.keys())}")
-        
-        # Log completo de las keys y estructura para debug
-        for k, v in r0.items():
-            vtype = type(v).__name__
-            vlen = len(v) if isinstance(v, (list, dict, str)) else ''
-            print(f"[SAM3 DETECT]   key={k}, type={vtype}, len={vlen}")
-        
-        # Extraer predicciones — el workflow puede devolver en varios formatos
-        predictions = []
-        for key in ["predictions", "output", "detections", "results"]:
-            val = r0.get(key)
-            if val is not None:
-                if isinstance(val, dict) and "predictions" in val:
-                    predictions = val["predictions"]
-                elif isinstance(val, list):
-                    predictions = val
-                if predictions:
-                    break
-        
-        print(f"[SAM3 DETECT] Predicciones extraídas: {len(predictions)}")
-        for i, p in enumerate(predictions[:5]):
-            if isinstance(p, dict):
-                print(f"[SAM3 DETECT]   raw[{i}] class={p.get('class','?')}, conf={p.get('confidence','?')}, "
-                      f"x={p.get('x','?')}, y={p.get('y','?')}, w={p.get('width','?')}, h={p.get('height','?')}")
-        
-        # Filtrar por confianza y forzar etiqueta "person"
-        requested_label = concepts[0] if concepts else "person"
-        detections = []
-        for pred in predictions:
-            if isinstance(pred, dict):
-                conf = float(pred.get("confidence", 0))
-                if conf >= confidence:
-                    pred_copy = dict(pred)
-                    pred_copy["class"] = requested_label
-                    detections.append(pred_copy)
-        
-        # Si el workflow solo devuelve count sin predicciones detalladas
-        if count > 0 and len(detections) == 0 and len(predictions) == 0:
-            print(f"[SAM3 DETECT] Workflow detectó {count} objetos pero sin coords detalladas")
-            output_img = r0.get("output_image", {})
-            if isinstance(output_img, dict) and output_img.get("value"):
-                detections = [{"class": "person", "confidence": 1.0, "count": count, 
-                              "output_image_b64": output_img["value"]}]
-        
-        print(f"[SAM3 DETECT] Total predicciones={len(predictions)}, detecciones={len(detections)}, count_objects={count}")
-        for i, p in enumerate(detections[:5]):
-            print(f"[SAM3 DETECT]   [{i}] class={p.get('class','?')}, conf={p.get('confidence',0)}")
-        
-        return detections
+        return result
         
     except Exception as e:
-        print(f"[SAM3 DETECT ERROR] {e}")
+        print(f"[SAM3 ERROR] {e}")
         import traceback
         traceback.print_exc()
         return []
+
+
+def _parse_sam3_result(raw_result, confidence=0.0):
+    """Extrae predicciones del resultado de la API REST de Roboflow.
+    Estructura: {"outputs": [{"model_predictions": {"predictions": [...]}}]}
+    """
+    detections = []
+    
+    # La API REST devuelve {"outputs": [...]}
+    if isinstance(raw_result, dict) and 'outputs' in raw_result:
+        items = raw_result['outputs']
+        print(f"[SAM3 PARSE] Encontrado 'outputs' con {len(items)} items")
+    elif isinstance(raw_result, list):
+        items = raw_result
+    else:
+        items = [raw_result]
+    
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        
+        print(f"[SAM3 PARSE] Keys: {list(item.keys())}")
+        
+        for key, val in item.items():
+            if isinstance(val, dict) and 'predictions' in val:
+                preds = val['predictions']
+                print(f"[SAM3 PARSE] '{key}' → {len(preds)} predictions")
+                for pred in preds:
+                    if isinstance(pred, dict):
+                        detections.append(pred)
+                        print(f"[SAM3 PARSE]   {pred.get('class','?')} conf={pred.get('confidence','?')}")
+            elif isinstance(val, list):
+                for pred in val:
+                    if isinstance(pred, dict) and ('x' in pred or 'width' in pred):
+                        detections.append(pred)
+    
+    print(f"[SAM3 PARSE] TOTAL: {len(detections)} detecciones")
+    return detections
 
 
 def _person_removal_loop():
@@ -319,7 +539,8 @@ def _person_removal_loop():
             cv2.imwrite(temp_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
 
             # ── Llamar a SAM3 para detectar personas ──
-            detections = _run_sam3_person_detection(temp_path, concepts=['person'], confidence=confidence)
+            raw = _run_sam3_detection(temp_path, class_names=['person', 'forklift'])
+            detections = _parse_sam3_result(raw, confidence=confidence)
 
             # Limpiar archivo temporal
             try:
@@ -1934,58 +2155,40 @@ class CameraHandler(BaseHTTPRequestHandler):
             import traceback
             try:
                 b64_str = params.get("image", "")
-                concepts = params.get("concepts", ["person"])
+                concepts = params.get("concepts", ["person", "forklift"])
                 conf_threshold = float(params.get("confidence", 0.3))
-                do_remove = params.get("remove", False)  # If True, inpaint to remove detected objects
+                do_remove = params.get("remove", False)
                 inpaint_radius = int(params.get("inpaint_radius", 5))
 
                 if not b64_str:
                     self._json_response({"ok": False, "error": "No image provided"})
                     return
 
-                if "," in b64_str:
-                    b64_str = b64_str.split(",")[1]
-
-                img_data = base64.b64decode(b64_str)
+                # Decodificar imagen
+                raw_b64 = b64_str.split(",")[1] if "," in b64_str else b64_str
+                img_data = base64.b64decode(raw_b64)
                 nparr = np.frombuffer(img_data, np.uint8)
                 img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 img_h, img_w = img_cv.shape[:2]
 
-                temp_path = "temp_sam3.jpg"
-                cv2.imwrite(temp_path, img_cv)
+                # Guardar temp file (Roboflow SDK necesita path de archivo)
+                import tempfile
+                temp_path = os.path.join(tempfile.gettempdir(), "sam3_frame.jpg")
+                cv2.imwrite(temp_path, img_cv, [cv2.IMWRITE_JPEG_QUALITY, 80])
 
-                print(f"[SAM3] Running SAM3 detection: concepts={concepts}, remove={do_remove}")
-
+                # Conectar con Roboflow — TRANSPARENTE
                 concepts_list = concepts if isinstance(concepts, list) else [concepts]
-                detections_raw = _run_sam3_person_detection(temp_path, concepts=concepts_list, confidence=conf_threshold)
+                raw_result = _run_sam3_detection(temp_path, class_names=concepts_list)
 
-                if os.path.exists(temp_path):
+                try:
                     os.remove(temp_path)
+                except:
+                    pass
+
+                # Extraer predicciones (confianza la gestiona Roboflow)
+                detections = _parse_sam3_result(raw_result)
 
                 output_image = None
-
-                # Map predictions to standardized format
-                predictions = detections_raw
-
-                # Map predictions to standardized format
-                detections = []
-                for pred in predictions:
-                    if isinstance(pred, dict):
-                        conf = float(pred.get("confidence", 0))
-                        if conf < conf_threshold:
-                            continue
-                        det = {
-                            "class": pred.get("class", pred.get("class_name", "person")),
-                            "confidence": conf,
-                            "x": pred.get("x", 0),
-                            "y": pred.get("y", 0),
-                            "width": pred.get("width", 0),
-                            "height": pred.get("height", 0),
-                            "detection_id": pred.get("detection_id", "sam3"),
-                        }
-                        if "points" in pred:
-                            det["points"] = pred["points"]
-                        detections.append(det)
 
                 # ── INPAINTING: Remove detected objects from image ──
                 cleaned_image_b64 = None
@@ -2082,7 +2285,8 @@ class CameraHandler(BaseHTTPRequestHandler):
                 print(f"[SAM3 REMOVE] Running SAM3 detection, method={inpaint_method}")
 
                 concepts_list = concepts if isinstance(concepts, list) else [concepts]
-                detections = _run_sam3_person_detection(temp_path, concepts=concepts_list, confidence=conf_threshold)
+                raw = _run_sam3_detection(temp_path, class_names=concepts_list)
+                detections = _parse_sam3_result(raw, confidence=conf_threshold)
 
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
@@ -2192,7 +2396,8 @@ class CameraHandler(BaseHTTPRequestHandler):
 
                 # ── Use SAM3 foundation model for person detection ──
                 concepts_list = concepts if isinstance(concepts, list) else [concepts]
-                detections = _run_sam3_person_detection(temp_path, concepts=concepts_list, confidence=conf_threshold)
+                raw = _run_sam3_detection(temp_path, class_names=concepts_list)
+                detections = _parse_sam3_result(raw, confidence=conf_threshold)
 
                 # Cleanup temp file
                 try:

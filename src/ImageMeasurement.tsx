@@ -16,7 +16,7 @@ interface Segment {
 
 const ImageMeasurement: React.FC = () => {
     const [imageSrc, setImageSrc] = useState<string | null>(null);
-    const [mode, setMode] = useState<MeasurementMode>('segmentos');
+    const [mode, _setMode] = useState<MeasurementMode>('segmentos');
     const [isProcessing, setIsProcessing] = useState(false);
     const [measurementResult, setMeasurementResult] = useState<string | null>(null);
     const [sourceType, setSourceType] = useState<SourceType>('image');
@@ -30,14 +30,15 @@ const ImageMeasurement: React.FC = () => {
     const [currentSegmentStart, setCurrentSegmentStart] = useState<Point | null>(null);
     const [points, setPoints] = useState<Point[]>([]);
     const [detections, setDetections] = useState<any[]>([]);
-    const [confidenceThreshold, setConfidenceThreshold] = useState(0.0);
+    const [confidenceThreshold, _setConfidenceThreshold] = useState(0.0);
 
     // ── SAM 3 Person Detection ──
-    const [sam3Confidence, setSam3Confidence] = useState(0.85);
+    const [_sam3Confidence, _setSam3Confidence] = useState(0.85);
     const [sam3Loading, setSam3Loading] = useState(false);
     const [sam3Result, setSam3Result] = useState<string | null>(null);
     const [sam3Active, setSam3Active] = useState(false);
     const [sam3Detections, setSam3Detections] = useState<any[]>([]);
+    const sam3DetectionsRef = useRef<any[]>([]);
 
     // ── Calibración (lee de localStorage, se guarda desde la pantalla de Calibración)
     const [mmPerPx, setMmPerPx] = useState<number>(() => {
@@ -81,6 +82,10 @@ const ImageMeasurement: React.FC = () => {
     const lastInferenceTimeRef = useRef<number>(0);
     const isInferringRef = useRef<boolean>(false);
     const confidenceRef = useRef<number>(0.0);
+    // SAM3 continuous tracking refs
+    const sam3ActiveRef = useRef<boolean>(false);
+    const sam3InferringRef = useRef<boolean>(false);
+    const sam3ConfidenceRef = useRef<number>(0.85);
 
     // ── Draggable dimension labels (same as calibration) ──
     const testDimOffsets = useRef<{ x: { dx: number; dy: number }; y: { dx: number; dy: number }; total: { dx: number; dy: number } }>({ x: { dx: 0, dy: 0 }, y: { dx: 0, dy: 0 }, total: { dx: 0, dy: 0 } });
@@ -120,6 +125,10 @@ const ImageMeasurement: React.FC = () => {
 
     // Keep confidenceRef in sync
     useEffect(() => { confidenceRef.current = confidenceThreshold; }, [confidenceThreshold]);
+    // Keep sam3DetectionsRef in sync with state so video render loop can access it
+    useEffect(() => { sam3DetectionsRef.current = sam3Detections; }, [sam3Detections]);
+    // Keep sam3ActiveRef in sync
+    useEffect(() => { sam3ActiveRef.current = sam3Active; }, [sam3Active]);
 
     useEffect(() => {
         if (sourceType === 'image') redrawCanvas();
@@ -310,6 +319,12 @@ const ImageMeasurement: React.FC = () => {
                 if (ts) drawTrackOverlay(ctx, dets, vw, vh, scale, offX, offY, confidenceRef.current, JSON.parse(ts));
             }
 
+            // Draw SAM3 person detections overlay (continuous tracking)
+            const sam3Dets = sam3DetectionsRef.current;
+            if (sam3Dets && sam3Dets.length > 0) {
+                drawDetectionsOnCanvas(ctx, sam3Dets, vw, vh, scale, offX, offY, 0);
+            }
+
             // Send next frame IMMEDIATELY when previous inference is done (no interval!)
             if (!isInferringRef.current) {
                 isInferringRef.current = true;
@@ -322,6 +337,17 @@ const ImageMeasurement: React.FC = () => {
                 }).catch(() => {
                     isInferringRef.current = false;
                     setVideoInferenceStatus('idle');
+                });
+            }
+
+            // SAM3 continuous person tracking — runs in parallel with Roboflow
+            if (sam3ActiveRef.current && !sam3InferringRef.current) {
+                sam3InferringRef.current = true;
+                sendFrameToSam3(video).then(personDets => {
+                    sam3DetectionsRef.current = personDets;
+                    sam3InferringRef.current = false;
+                }).catch(() => {
+                    sam3InferringRef.current = false;
                 });
             }
 
@@ -386,6 +412,72 @@ const ImageMeasurement: React.FC = () => {
             return preds;
         } catch {
             return [];
+        }
+    };
+
+    // Send a single frame to SAM3 for person detection — runs in parallel with Roboflow
+    const sendFrameToSam3 = async (video: HTMLVideoElement): Promise<any[]> => {
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        // Downscale aggressively for fastest possible upload
+        const MAX_W = 320;
+        const downscale = vw > MAX_W ? MAX_W / vw : 1;
+        const tw = Math.round(vw * downscale);
+        const th = Math.round(vh * downscale);
+
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = tw;
+        tempCanvas.height = th;
+        const tCtx = tempCanvas.getContext('2d');
+        if (!tCtx) return [];
+        tCtx.drawImage(video, 0, 0, tw, th);
+        const frameSrc = tempCanvas.toDataURL('image/jpeg', 0.3);
+
+        try {
+            const response = await fetch('http://localhost:8765/api/sam3/detect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image: frameSrc,
+                    concepts: ['person', 'forklift'],
+                    confidence: sam3ConfidenceRef.current,
+                    remove: false,
+                }),
+            });
+            const data = await response.json();
+            if (!data.ok) return sam3DetectionsRef.current; // keep previous detections
+            const rawDets: any[] = data.detections || [];
+            // Tag with class PERSONA and _sam3 marker
+            const personDets = rawDets.map((d: any) => ({
+                ...d,
+                class: 'PERSONA',
+                _sam3: true,
+            }));
+            // Scale predictions back to original video resolution if downscaled
+            if (downscale < 1 && personDets.length > 0) {
+                const upscale = 1 / downscale;
+                return personDets.map((det: any) => {
+                    const scaled: any = { ...det };
+                    const isNorm = (det.x > 0 && det.x <= 1.1) && (det.width > 0 && det.width <= 1.1);
+                    if (!isNorm) {
+                        if (det.x !== undefined) scaled.x = det.x * upscale;
+                        if (det.y !== undefined) scaled.y = det.y * upscale;
+                        if (det.width !== undefined) scaled.width = det.width * upscale;
+                        if (det.height !== undefined) scaled.height = det.height * upscale;
+                    }
+                    if (det.points && Array.isArray(det.points)) {
+                        scaled.points = det.points.map((pt: any) => {
+                            const pNorm = (pt.x > 0 && pt.x <= 1.1) && (pt.y > 0 && pt.y <= 1.1);
+                            if (pNorm) return pt;
+                            return { ...pt, x: pt.x * upscale, y: pt.y * upscale };
+                        });
+                    }
+                    return scaled;
+                });
+            }
+            return personDets;
+        } catch {
+            return sam3DetectionsRef.current; // keep previous on error
         }
     };
 
@@ -1033,7 +1125,7 @@ const ImageMeasurement: React.FC = () => {
         return Math.hypot(point1.x - point2.x, point1.y - point2.y);
     };
 
-    const processAndMeasure = async () => {
+    const _processAndMeasure = async () => {
         if (!imageSrc) return;
 
         if (mode === 'segmentos' && segments.length < 2) {
@@ -1335,24 +1427,7 @@ const ImageMeasurement: React.FC = () => {
                     </div>
                 )}
 
-                <div style={styles.modeSelector}>
-                    <h3>Filtro Roboflow</h3>
-                    <div style={{ marginBottom: 10 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
-                            <span style={{ fontSize: '13px', color: '#aaa' }}>Confidence Threshold</span>
-                            <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#BD00FF' }}>{(confidenceThreshold * 100).toFixed(0)}%</span>
-                        </div>
-                        <input
-                            type="range"
-                            min="0"
-                            max="1"
-                            step="0.01"
-                            value={confidenceThreshold}
-                            onChange={(e) => setConfidenceThreshold(parseFloat(e.target.value))}
-                            style={styles.slider}
-                        />
-                    </div>
-                </div>
+
 
                 {/* ── SAM 3 — Detección de Personas ── */}
                 <div style={{
@@ -1382,18 +1457,6 @@ const ImageMeasurement: React.FC = () => {
                         Detecta personas automáticamente en la imagen o vídeo
                     </div>
 
-                    <div style={{ marginBottom: 8 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                            <span style={{ fontSize: '11px', color: '#8b949e' }}>Confianza</span>
-                            <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#a78bfa' }}>{(sam3Confidence * 100).toFixed(0)}%</span>
-                        </div>
-                        <input
-                            type="range" min="0" max="1" step="0.05"
-                            value={sam3Confidence}
-                            onChange={(e) => setSam3Confidence(parseFloat(e.target.value))}
-                            style={{ ...styles.slider, accentColor: '#7c3aed' }}
-                        />
-                    </div>
 
                     <button
                         disabled={sam3Loading || (!imageSrc && sourceType !== 'video')}
@@ -1417,6 +1480,8 @@ const ImageMeasurement: React.FC = () => {
                                 setSam3Result(null);
                                 // Remove SAM3 detections from the main detections
                                 setSam3Detections([]);
+                                sam3DetectionsRef.current = [];
+                                sam3InferringRef.current = false;
                                 setDetections(prev => prev.filter(d => d._sam3 !== true));
                                 return;
                             }
@@ -1445,8 +1510,7 @@ const ImageMeasurement: React.FC = () => {
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({
                                         image: imgToSend,
-                                        concepts: ['person'],
-                                        confidence: sam3Confidence,
+                                        concepts: ['person', 'forklift'],
                                         remove: false,
                                     }),
                                 });
@@ -1454,20 +1518,19 @@ const ImageMeasurement: React.FC = () => {
                                 if (data.ok) {
                                     const rawDets = data.detections || [];
                                     const count = rawDets.length;
-                                    setSam3Result(`✅ ${count} persona(s) detectada(s)`);
+                                    setSam3Result(`✅ ${count} objeto(s) detectado(s)`);
                                     if (count > 0) {
                                         setSam3Active(true);
-                                        // Add SAM3 person detections to the canvas with class "PERSONA"
-                                        const personDets = rawDets.map((d: any) => ({
+                                        // Usar la clase real de Roboflow (person, forklift, etc.)
+                                        const sam3Dets = rawDets.map((d: any) => ({
                                             ...d,
-                                            class: 'PERSONA',
-                                            _sam3: true, // marker to identify SAM3 detections
+                                            class: (d.class || 'person').toUpperCase(),
+                                            _sam3: true,
                                         }));
-                                        setSam3Detections(personDets);
-                                        // Merge with existing detections
+                                        setSam3Detections(sam3Dets);
                                         setDetections(prev => [
                                             ...prev.filter(d => d._sam3 !== true),
-                                            ...personDets,
+                                            ...sam3Dets,
                                         ]);
                                     } else {
                                         setSam3Active(false);
