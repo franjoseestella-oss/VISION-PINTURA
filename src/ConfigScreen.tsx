@@ -65,7 +65,9 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
 
     // Barcode keyboard listener
     useEffect(() => {
-        if (!barcodeListening) return;
+        // ALWAYS listen if we are inside the 3D viewer, or if explicitly listening
+        if (!barcodeListening && !viewingObj) return;
+        
         const handleKeyDown = (e: KeyboardEvent) => {
             // Ignore if user is typing in an input
             const tag = (e.target as HTMLElement).tagName;
@@ -118,7 +120,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [barcodeListening, barcodePrefix, barcodeSuffix, barcodeSound]);
+    }, [barcodeListening, viewingObj, barcodePrefix, barcodeSuffix, barcodeSound]);
 
     // ═══ TOLERANCIAS TRACKING STATE ═══
     const [tolerances, setTolerances] = useState<TrackTolerance[]>(() => {
