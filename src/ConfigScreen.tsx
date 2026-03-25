@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import ObjViewer from './ObjViewer';
 
 // ─── Types ──────────────────────────────────────────────────────
 interface VideoMapping {
@@ -31,6 +32,7 @@ type ConfigTab = 'videoMapping' | 'tolerancias';
 
 const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMappingVideoUpload, onMappingObjUpload }) => {
     const [configTab, setConfigTab] = useState<ConfigTab>('tolerancias');
+    const [viewingObj, setViewingObj] = useState<{ url: string; fileName: string } | null>(null);
 
     // ═══ TOLERANCIAS TRACKING STATE ═══
     const [tolerances, setTolerances] = useState<TrackTolerance[]>(() => {
@@ -400,6 +402,29 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                     }}>
                                                         <span style={{ color: '#58a6ff', fontSize: '0.72rem', fontWeight: 700 }}>✓ Modelo .obj cargado</span>
                                                         <span style={{ fontSize: '0.68rem', color: '#8b949e' }}>{map.objFile}</span>
+                                                        <button
+                                                            onClick={() => setViewingObj({ url: map.objBlobUrl!, fileName: map.objFile || '.obj' })}
+                                                            style={{
+                                                                marginLeft: 'auto',
+                                                                padding: '4px 14px',
+                                                                background: 'linear-gradient(135deg, #8957e5, #a371f7)',
+                                                                color: '#fff',
+                                                                border: 'none',
+                                                                borderRadius: 6,
+                                                                cursor: 'pointer',
+                                                                fontWeight: 700,
+                                                                fontSize: '0.72rem',
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                gap: 4,
+                                                                transition: 'all 0.2s',
+                                                                boxShadow: '0 2px 8px rgba(137,87,229,0.3)',
+                                                            }}
+                                                            onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
+                                                            onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                                                        >
+                                                            👁 VER
+                                                        </button>
                                                     </div>
                                                 )}
                                             </div>
@@ -596,6 +621,15 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                     </div>
                 )}
             </div>
+
+            {/* 3D OBJ Viewer Modal */}
+            {viewingObj && (
+                <ObjViewer
+                    objUrl={viewingObj.url}
+                    fileName={viewingObj.fileName}
+                    onClose={() => setViewingObj(null)}
+                />
+            )}
         </div>
     );
 };
