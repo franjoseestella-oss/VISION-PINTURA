@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import ObjViewer from './ObjViewer';
 
 // ─── Types ──────────────────────────────────────────────────────
@@ -42,11 +42,65 @@ interface ConfigScreenProps {
 }
 
 // ─── Sub-tab type ───────────────────────────────────────────────
-type ConfigTab = 'videoMapping' | 'tolerancias';
+type ConfigTab = 'videoMapping' | 'tolerancias' | 'barcode';
 
 const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMappingVideoUpload, onMappingObjUpload, onMappingMtlUpload }) => {
     const [configTab, setConfigTab] = useState<ConfigTab>('tolerancias');
     const [viewingObj, setViewingObj] = useState<{ url: string; fileName: string; mtlUrl?: string; mappingId: string } | null>(null);
+
+    // ═══ BARCODE READER STATE ═══
+    const [barcodeListening, setBarcodeListening] = useState(false);
+    const [barcodeHistory, setBarcodeHistory] = useState<{ code: string; timestamp: string }[]>(() => {
+        const saved = localStorage.getItem('barcodeHistory');
+        return saved ? JSON.parse(saved) : [];
+    });
+    const [barcodePrefix, setBarcodePrefix] = useState(() => localStorage.getItem('barcodePrefix') || '');
+    const [barcodeSuffix, setBarcodeSuffix] = useState(() => localStorage.getItem('barcodeSuffix') || '');
+    const [barcodeSound, setBarcodeSound] = useState(() => localStorage.getItem('barcodeSound') !== 'false');
+    const barcodeBuffer = useRef('');
+    const barcodeTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    // Barcode keyboard listener
+    useEffect(() => {
+        if (!barcodeListening) return;
+        const handleKeyDown = (e: KeyboardEvent) => {
+            // Ignore if user is typing in an input
+            const tag = (e.target as HTMLElement).tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+            if (barcodeTimeout.current) clearTimeout(barcodeTimeout.current);
+
+            if (e.key === 'Enter') {
+                const code = barcodeBuffer.current.trim();
+                if (code.length > 1) {
+                    // Apply prefix/suffix filter
+                    const pre = barcodePrefix;
+                    const suf = barcodeSuffix;
+                    if (pre && !code.startsWith(pre)) { barcodeBuffer.current = ''; return; }
+                    if (suf && !code.endsWith(suf)) { barcodeBuffer.current = ''; return; }
+
+                    const entry = {
+                        code,
+                        timestamp: new Date().toLocaleString('es-ES'),
+                    };
+                    setBarcodeHistory(prev => {
+                        const updated = [entry, ...prev].slice(0, 200);
+                        localStorage.setItem('barcodeHistory', JSON.stringify(updated));
+                        return updated;
+                    });
+                    if (barcodeSound) {
+                        try { new Audio('data:audio/wav;base64,UklGRl9vT19teleVBhdmVmbXQgAAAAEAABACDdAAAA').play().catch(() => {}); } catch {}
+                    }
+                }
+                barcodeBuffer.current = '';
+            } else if (e.key.length === 1) {
+                barcodeBuffer.current += e.key;
+                barcodeTimeout.current = setTimeout(() => { barcodeBuffer.current = ''; }, 100);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [barcodeListening, barcodePrefix, barcodeSuffix, barcodeSound]);
 
     // ═══ TOLERANCIAS TRACKING STATE ═══
     const [tolerances, setTolerances] = useState<TrackTolerance[]>(() => {
@@ -156,6 +210,9 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                 </button>
                 <button style={tabStyle(configTab === 'tolerancias')} onClick={() => setConfigTab('tolerancias')}>
                     📐 Tolerancias Tracking
+                </button>
+                <button style={tabStyle(configTab === 'barcode')} onClick={() => setConfigTab('barcode')}>
+                    📊 Lector Código de Barras
                 </button>
             </div>
 
@@ -500,7 +557,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                             </div>
                         )}
                     </div>
-                ) : (
+                ) : configTab === 'tolerancias' ? (
                     /* ═══ TOLERANCIAS TRACKING ═══ */
                     <div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
@@ -673,7 +730,176 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                             )}
                         </div>
                     </div>
-                )}
+                ) : configTab === 'barcode' ? (
+                    /* ═══ BARCODE READER ═══ */
+                    <div>
+                        <h2 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: 8, color: '#fff' }}>📊 Lector Código de Barras</h2>
+                        <p style={{ fontSize: '0.82rem', color: '#8b949e', marginBottom: 6 }}>
+                            DATALOGIC modelo GD4520 — Conexión USB HID
+                        </p>
+                        <p style={{ fontSize: '0.72rem', color: '#484f58', marginBottom: 20 }}>
+                            El lector envía los datos como pulsaciones de teclado. Activa la escucha para capturar los códigos escaneados.
+                        </p>
+
+                        {/* Control principal */}
+                        <div style={{
+                            display: 'flex', gap: 16, marginBottom: 24, alignItems: 'stretch',
+                        }}>
+                            {/* Botón escucha */}
+                            <button
+                                onClick={() => {
+                                    const next = !barcodeListening;
+                                    setBarcodeListening(next);
+                                }}
+                                style={{
+                                    flex: 1, padding: '20px 24px',
+                                    background: barcodeListening
+                                        ? 'linear-gradient(135deg, #238636, #2ea043)'
+                                        : 'linear-gradient(135deg, #21262d, #30363d)',
+                                    color: '#fff', border: barcodeListening ? '2px solid #3fb950' : '2px solid #30363d',
+                                    borderRadius: 12, cursor: 'pointer', fontWeight: 700, fontSize: '1.1rem',
+                                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+                                    transition: 'all 0.3s',
+                                    boxShadow: barcodeListening ? '0 0 30px rgba(35,134,54,0.4)' : 'none',
+                                    animation: barcodeListening ? 'pulse 2s infinite' : 'none',
+                                }}>
+                                <span style={{ fontSize: '2.5rem' }}>{barcodeListening ? '📡' : '📊'}</span>
+                                {barcodeListening ? '🟢 ESCUCHANDO...' : '⚪ INICIAR ESCUCHA'}
+                                <span style={{ fontSize: '0.72rem', fontWeight: 400, color: barcodeListening ? '#a5d6a7' : '#8b949e' }}>
+                                    {barcodeListening ? 'Escanea un código de barras ahora' : 'Pulsa para activar la captura'}
+                                </span>
+                            </button>
+
+                            {/* Estado */}
+                            <div style={{
+                                flex: 1, padding: '20px 24px', background: '#161b22', border: '1px solid #30363d',
+                                borderRadius: 12, display: 'flex', flexDirection: 'column', justifyContent: 'center',
+                            }}>
+                                <div style={{ fontSize: '0.78rem', color: '#8b949e', marginBottom: 8, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1 }}>Estadísticas</div>
+                                <div style={{ display: 'flex', gap: 20 }}>
+                                    <div>
+                                        <div style={{ fontSize: '2rem', fontWeight: 700, color: '#58a6ff' }}>{barcodeHistory.length}</div>
+                                        <div style={{ fontSize: '0.72rem', color: '#8b949e' }}>Escaneos totales</div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '2rem', fontWeight: 700, color: '#3fb950' }}>{barcodeHistory.length > 0 ? barcodeHistory[0].code.length : 0}</div>
+                                        <div style={{ fontSize: '0.72rem', color: '#8b949e' }}>Último (chars)</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Configuración */}
+                        <div style={{
+                            display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 24,
+                        }}>
+                            <div style={{ padding: '14px 16px', background: '#161b22', border: '1px solid #30363d', borderRadius: 10 }}>
+                                <label style={{ fontSize: '0.72rem', color: '#8b949e', fontWeight: 600, display: 'block', marginBottom: 6 }}>PREFIJO (filtro)</label>
+                                <input
+                                    type="text" value={barcodePrefix} placeholder="ej: PRE-"
+                                    onChange={(e) => { setBarcodePrefix(e.target.value); localStorage.setItem('barcodePrefix', e.target.value); }}
+                                    style={{
+                                        width: '100%', padding: '8px 12px', background: '#0d1117', border: '1px solid #30363d',
+                                        borderRadius: 6, color: '#e6edf3', fontSize: '0.88rem', boxSizing: 'border-box',
+                                    }}
+                                />
+                            </div>
+                            <div style={{ padding: '14px 16px', background: '#161b22', border: '1px solid #30363d', borderRadius: 10 }}>
+                                <label style={{ fontSize: '0.72rem', color: '#8b949e', fontWeight: 600, display: 'block', marginBottom: 6 }}>SUFIJO (filtro)</label>
+                                <input
+                                    type="text" value={barcodeSuffix} placeholder="ej: -END"
+                                    onChange={(e) => { setBarcodeSuffix(e.target.value); localStorage.setItem('barcodeSuffix', e.target.value); }}
+                                    style={{
+                                        width: '100%', padding: '8px 12px', background: '#0d1117', border: '1px solid #30363d',
+                                        borderRadius: 6, color: '#e6edf3', fontSize: '0.88rem', boxSizing: 'border-box',
+                                    }}
+                                />
+                            </div>
+                            <div style={{
+                                padding: '14px 16px', background: '#161b22', border: '1px solid #30363d', borderRadius: 10,
+                                display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer',
+                            }} onClick={() => { setBarcodeSound(!barcodeSound); localStorage.setItem('barcodeSound', String(!barcodeSound)); }}>
+                                <div style={{
+                                    width: 44, height: 24, borderRadius: 12, position: 'relative', transition: 'all 0.3s',
+                                    background: barcodeSound ? '#238636' : '#30363d',
+                                }}>
+                                    <div style={{
+                                        width: 20, height: 20, borderRadius: '50%', background: '#fff',
+                                        position: 'absolute', top: 2, transition: 'all 0.3s',
+                                        left: barcodeSound ? 22 : 2,
+                                    }} />
+                                </div>
+                                <div>
+                                    <div style={{ fontSize: '0.72rem', color: '#8b949e', fontWeight: 600 }}>SONIDO</div>
+                                    <div style={{ fontSize: '0.82rem', color: '#e6edf3' }}>{barcodeSound ? '🔊 Activado' : '🔇 Silenciado'}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Último escaneo destacado */}
+                        {barcodeHistory.length > 0 && (
+                            <div style={{
+                                padding: '20px 24px', marginBottom: 20,
+                                background: 'linear-gradient(135deg, #0d1117, #161b22)',
+                                border: '2px solid #1f6feb',
+                                borderRadius: 12,
+                                boxShadow: '0 0 20px rgba(31,111,235,0.15)',
+                            }}>
+                                <div style={{ fontSize: '0.72rem', color: '#58a6ff', fontWeight: 700, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>Último código escaneado</div>
+                                <div style={{ fontSize: '1.8rem', fontWeight: 700, color: '#fff', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                                    {barcodeHistory[0].code}
+                                </div>
+                                <div style={{ fontSize: '0.72rem', color: '#8b949e', marginTop: 6 }}>
+                                    {barcodeHistory[0].timestamp}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Historial */}
+                        <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#e6edf3' }}>📜 Historial de Escaneos</h3>
+                            {barcodeHistory.length > 0 && (
+                                <button
+                                    onClick={() => { if (confirm('¿Borrar todo el historial?')) { setBarcodeHistory([]); localStorage.removeItem('barcodeHistory'); } }}
+                                    style={{ padding: '6px 14px', fontSize: '0.72rem', fontWeight: 600, background: 'transparent', color: '#f85149', border: '1px solid #f8514930', borderRadius: 6, cursor: 'pointer' }}
+                                >🗑 Limpiar</button>
+                            )}
+                        </div>
+
+                        {barcodeHistory.length === 0 ? (
+                            <div style={{ textAlign: 'center', padding: '40px 20px', color: '#484f58', fontSize: '0.88rem' }}>
+                                <div style={{ fontSize: '3rem', marginBottom: 12 }}>📊</div>
+                                No hay escaneos registrados. Activa la escucha y escanea un código.
+                            </div>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <div style={{
+                                    display: 'grid', gridTemplateColumns: '50px 1fr 180px 60px', gap: 8,
+                                    padding: '8px 12px', background: '#161b22', borderRadius: '8px 8px 0 0',
+                                    fontSize: '0.68rem', fontWeight: 700, color: '#8b949e', textTransform: 'uppercase',
+                                }}>
+                                    <span>#</span><span>Código</span><span>Fecha/Hora</span><span></span>
+                                </div>
+                                {barcodeHistory.map((entry, i) => (
+                                    <div key={i} style={{
+                                        display: 'grid', gridTemplateColumns: '50px 1fr 180px 60px', gap: 8,
+                                        padding: '10px 12px', background: i % 2 === 0 ? '#0d1117' : '#161b22',
+                                        borderBottom: '1px solid #21262d', alignItems: 'center',
+                                        borderRadius: i === barcodeHistory.length - 1 ? '0 0 8px 8px' : 0,
+                                    }}>
+                                        <span style={{ fontSize: '0.72rem', color: '#484f58', fontWeight: 600 }}>{barcodeHistory.length - i}</span>
+                                        <span style={{ fontSize: '0.88rem', color: '#e6edf3', fontFamily: 'monospace', fontWeight: 600, wordBreak: 'break-all' }}>{entry.code}</span>
+                                        <span style={{ fontSize: '0.72rem', color: '#8b949e' }}>{entry.timestamp}</span>
+                                        <button
+                                            onClick={() => navigator.clipboard.writeText(entry.code)}
+                                            style={{ padding: '4px 8px', background: '#21262d', border: '1px solid #30363d', borderRadius: 4, color: '#8b949e', cursor: 'pointer', fontSize: '0.68rem' }}
+                                        >📋</button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                ) : null}
             </div>
 
             {/* 3D OBJ Viewer Modal */}
