@@ -34,6 +34,7 @@ interface ModelSpecs {
 interface VideoMapping {
   id: string;
   label: string;
+  robotProgram?: string;
   videoFile: string;
   videoBlobUrl?: string;
   objFile?: string;

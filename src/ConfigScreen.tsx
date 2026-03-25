@@ -15,6 +15,7 @@ interface ModelSpecs {
 interface VideoMapping {
     id: string;
     label: string;
+    robotProgram?: string;
     videoFile: string;
     videoBlobUrl?: string;
     objFile?: string;
@@ -371,6 +372,24 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                     style={{
                                                         width: '100%', padding: '8px 12px', background: '#0d1117',
                                                         border: '1px solid #30363d', borderRadius: 6, color: '#e6edf3',
+                                                        fontSize: '0.85rem', fontWeight: 600, boxSizing: 'border-box',
+                                                    }}
+                                                />
+                                            </div>
+
+                                            {/* Robot Program field */}
+                                            <div>
+                                                <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
+                                                    🤖 Programa Robot
+                                                </label>
+                                                <input
+                                                    type="text" value={map.robotProgram || ''}
+                                                    onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, robotProgram: e.target.value } : m))}
+                                                    placeholder="Ej: PRG_001"
+                                                    style={{
+                                                        width: '100%', padding: '8px 12px', background: '#0d1117',
+                                                        border: `1px solid ${map.robotProgram ? '#f0883e40' : '#30363d'}`, borderRadius: 6,
+                                                        color: map.robotProgram ? '#f0883e' : '#e6edf3',
                                                         fontSize: '0.85rem', fontWeight: 600, boxSizing: 'border-box',
                                                     }}
                                                 />
