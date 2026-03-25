@@ -369,20 +369,23 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, modelSp
                             onMouseDown={(e) => e.stopPropagation()}
                             style={{
                                 position: 'absolute',
-                                bottom: 20,
+                                top: 20,
                                 left: 20,
+                                bottom: 20,
                                 zIndex: 10,
-                                background: 'rgba(13,17,23,0.92)',
+                                background: 'rgba(13,17,23,0.94)',
                                 border: '1px solid #30363d',
-                                borderRadius: 12,
-                                padding: '16px 20px',
-                                backdropFilter: 'blur(10px)',
-                                minWidth: 480,
-                                maxWidth: 580,
-                                boxShadow: '0 12px 48px rgba(0,0,0,0.6)',
+                                borderRadius: 14,
+                                padding: '24px 28px',
+                                backdropFilter: 'blur(12px)',
+                                width: 520,
+                                boxShadow: '0 16px 64px rgba(0,0,0,0.7)',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                overflow: 'auto',
                             }}
                         >
-                            <div style={{ fontSize: '0.88rem', fontWeight: 700, color: '#8b949e', marginBottom: 12, textTransform: 'uppercase', letterSpacing: 1.2 }}>
+                            <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#8b949e', marginBottom: 18, textTransform: 'uppercase', letterSpacing: 1.5 }}>
                                 📋 Especificaciones
                             </div>
                             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -398,12 +401,12 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, modelSp
                                     ].map((field, i) => (
                                         <tr key={field.key} style={{ borderBottom: i < 6 ? '1px solid #21262d' : 'none' }}>
                                             <td style={{
-                                                padding: '8px 12px', fontSize: '0.88rem', fontWeight: 700, color: '#58a6ff',
+                                                padding: '12px 14px', fontSize: '1.05rem', fontWeight: 700, color: '#58a6ff',
                                                 whiteSpace: 'nowrap', width: '40%', verticalAlign: 'middle',
                                             }}>
                                                 {field.label}
                                             </td>
-                                            <td style={{ padding: '5px 6px' }}>
+                                            <td style={{ padding: '8px 8px' }}>
                                                 <input
                                                     type="text"
                                                     value={modelSpecs[field.key] || ''}
@@ -415,12 +418,12 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, modelSp
                                                     }}
                                                     style={{
                                                         width: '100%',
-                                                        padding: '7px 10px',
+                                                        padding: '10px 14px',
                                                         background: 'rgba(22,27,34,0.8)',
                                                         border: '1px solid #30363d',
-                                                        borderRadius: 5,
+                                                        borderRadius: 6,
                                                         color: '#e6edf3',
-                                                        fontSize: '0.88rem',
+                                                        fontSize: '1.05rem',
                                                         boxSizing: 'border-box',
                                                         outline: 'none',
                                                         transition: 'border-color 0.2s',
