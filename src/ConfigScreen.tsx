@@ -2,6 +2,16 @@ import { useState, useEffect, useCallback } from 'react';
 import ObjViewer from './ObjViewer';
 
 // ─── Types ──────────────────────────────────────────────────────
+interface ModelSpecs {
+    numSec?: string;
+    color?: string;
+    referencia?: string;
+    modeloMaquina?: string;
+    programaRobot?: string;
+    cotaX1?: string;
+    cotaX2?: string;
+}
+
 interface VideoMapping {
     id: string;
     label: string;
@@ -11,6 +21,7 @@ interface VideoMapping {
     objBlobUrl?: string;
     mtlFile?: string;
     mtlBlobUrl?: string;
+    modelSpecs?: ModelSpecs;
 }
 
 interface TrackTolerance {
@@ -35,7 +46,7 @@ type ConfigTab = 'videoMapping' | 'tolerancias';
 
 const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMappingVideoUpload, onMappingObjUpload, onMappingMtlUpload }) => {
     const [configTab, setConfigTab] = useState<ConfigTab>('tolerancias');
-    const [viewingObj, setViewingObj] = useState<{ url: string; fileName: string; mtlUrl?: string } | null>(null);
+    const [viewingObj, setViewingObj] = useState<{ url: string; fileName: string; mtlUrl?: string; mappingId: string } | null>(null);
 
     // ═══ TOLERANCIAS TRACKING STATE ═══
     const [tolerances, setTolerances] = useState<TrackTolerance[]>(() => {
@@ -409,7 +420,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                             <span style={{ fontSize: '0.68rem', color: '#3fb950', fontWeight: 600 }}>✓ .mtl</span>
                                                         )}
                                                         <button
-                                                            onClick={() => setViewingObj({ url: map.objBlobUrl!, fileName: map.objFile || '.obj', mtlUrl: map.mtlBlobUrl })}
+                                                            onClick={() => setViewingObj({ url: map.objBlobUrl!, fileName: map.objFile || '.obj', mtlUrl: map.mtlBlobUrl, mappingId: map.id })}
                                                             style={{
                                                                 marginLeft: 'auto',
                                                                 padding: '4px 14px',
@@ -671,6 +682,12 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                     objUrl={viewingObj.url}
                     mtlUrl={viewingObj.mtlUrl}
                     fileName={viewingObj.fileName}
+                    modelSpecs={mappings.find(m => m.id === viewingObj.mappingId)?.modelSpecs || {}}
+                    onSpecsUpdate={(specs) => {
+                        setMappings(prev => prev.map(m =>
+                            m.id === viewingObj.mappingId ? { ...m, modelSpecs: specs } : m
+                        ));
+                    }}
                     onClose={() => setViewingObj(null)}
                 />
             )}

@@ -3,14 +3,26 @@ import * as THREE from 'three';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
 
+interface ModelSpecs {
+    numSec?: string;
+    color?: string;
+    referencia?: string;
+    modeloMaquina?: string;
+    programaRobot?: string;
+    cotaX1?: string;
+    cotaX2?: string;
+}
+
 interface ObjViewerProps {
     objUrl: string;
     mtlUrl?: string;
     fileName: string;
+    modelSpecs?: ModelSpecs;
+    onSpecsUpdate?: (specs: ModelSpecs) => void;
     onClose: () => void;
 }
 
-const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, onClose }) => {
+const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, modelSpecs = {}, onSpecsUpdate, onClose }) => {
     const mountRef = useRef<HTMLDivElement>(null);
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
     const animFrameRef = useRef<number>(0);
@@ -351,6 +363,78 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, onClose
                         overflow: 'hidden',
                     }}
                 >
+                    {/* Specs table overlay */}
+                    {!loading && !error && (
+                        <div
+                            onMouseDown={(e) => e.stopPropagation()}
+                            style={{
+                                position: 'absolute',
+                                bottom: 16,
+                                left: 16,
+                                zIndex: 10,
+                                background: 'rgba(13,17,23,0.88)',
+                                border: '1px solid #30363d',
+                                borderRadius: 10,
+                                padding: '10px 14px',
+                                backdropFilter: 'blur(8px)',
+                                minWidth: 320,
+                                maxWidth: 420,
+                                boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+                            }}
+                        >
+                            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#8b949e', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>
+                                📋 Especificaciones
+                            </div>
+                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <tbody>
+                                    {[
+                                        { key: 'numSec' as const, label: 'Nº SEC' },
+                                        { key: 'color' as const, label: 'COLOR' },
+                                        { key: 'referencia' as const, label: 'REFERENCIA' },
+                                        { key: 'modeloMaquina' as const, label: 'MODELO MÁQUINA' },
+                                        { key: 'programaRobot' as const, label: 'PROGRAMA ROBOT' },
+                                        { key: 'cotaX1' as const, label: 'COTA X1' },
+                                        { key: 'cotaX2' as const, label: 'COTA X2' },
+                                    ].map((field, i) => (
+                                        <tr key={field.key} style={{ borderBottom: i < 6 ? '1px solid #21262d' : 'none' }}>
+                                            <td style={{
+                                                padding: '5px 8px', fontSize: '0.7rem', fontWeight: 700, color: '#58a6ff',
+                                                whiteSpace: 'nowrap', width: '40%', verticalAlign: 'middle',
+                                            }}>
+                                                {field.label}
+                                            </td>
+                                            <td style={{ padding: '3px 4px' }}>
+                                                <input
+                                                    type="text"
+                                                    value={modelSpecs[field.key] || ''}
+                                                    placeholder="—"
+                                                    onChange={(e) => {
+                                                        if (onSpecsUpdate) {
+                                                            onSpecsUpdate({ ...modelSpecs, [field.key]: e.target.value });
+                                                        }
+                                                    }}
+                                                    style={{
+                                                        width: '100%',
+                                                        padding: '4px 8px',
+                                                        background: 'rgba(22,27,34,0.8)',
+                                                        border: '1px solid #30363d',
+                                                        borderRadius: 4,
+                                                        color: '#e6edf3',
+                                                        fontSize: '0.72rem',
+                                                        boxSizing: 'border-box',
+                                                        outline: 'none',
+                                                        transition: 'border-color 0.2s',
+                                                    }}
+                                                    onFocus={(e) => e.currentTarget.style.borderColor = '#58a6ff'}
+                                                    onBlur={(e) => e.currentTarget.style.borderColor = '#30363d'}
+                                                />
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
                     {/* Loading overlay */}
                     {loading && (
                         <div style={{

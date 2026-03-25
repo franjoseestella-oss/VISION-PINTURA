@@ -21,15 +21,26 @@ interface Detection {
   color: string;
 }
 
+interface ModelSpecs {
+  numSec?: string;
+  color?: string;
+  referencia?: string;
+  modeloMaquina?: string;
+  programaRobot?: string;
+  cotaX1?: string;
+  cotaX2?: string;
+}
+
 interface VideoMapping {
   id: string;
   label: string;
   videoFile: string;
-  videoBlobUrl?: string; // Uploaded video blob URL
-  objFile?: string;      // .obj 3D model filename
-  objBlobUrl?: string;   // .obj blob URL for download/preview
-  mtlFile?: string;      // .mtl material filename
-  mtlBlobUrl?: string;   // .mtl blob URL
+  videoBlobUrl?: string;
+  objFile?: string;
+  objBlobUrl?: string;
+  mtlFile?: string;
+  mtlBlobUrl?: string;
+  modelSpecs?: ModelSpecs;
 }
 
 interface ChatMessage {
