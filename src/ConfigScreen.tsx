@@ -6,6 +6,8 @@ interface VideoMapping {
     label: string;
     videoFile: string;
     videoBlobUrl?: string;
+    objFile?: string;
+    objBlobUrl?: string;
 }
 
 interface TrackTolerance {
@@ -21,12 +23,13 @@ interface ConfigScreenProps {
     mappings: VideoMapping[];
     setMappings: React.Dispatch<React.SetStateAction<VideoMapping[]>>;
     onMappingVideoUpload?: (mappingId: string, file: File) => void;
+    onMappingObjUpload?: (mappingId: string, file: File) => void;
 }
 
 // ─── Sub-tab type ───────────────────────────────────────────────
 type ConfigTab = 'videoMapping' | 'tolerancias';
 
-const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMappingVideoUpload }) => {
+const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMappingVideoUpload, onMappingObjUpload }) => {
     const [configTab, setConfigTab] = useState<ConfigTab>('tolerancias');
 
     // ═══ TOLERANCIAS TRACKING STATE ═══
@@ -192,7 +195,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                             </button>
                             {mappings.length > 0 && (
                                 <span style={{ fontSize: '0.75rem', color: '#8b949e', marginLeft: 'auto' }}>
-                                    {mappings.filter(m => m.videoFile).length}/{mappings.length} con vídeo asignado
+                                    {mappings.filter(m => m.videoFile).length}/{mappings.length} con vídeo | {mappings.filter(m => m.objFile).length}/{mappings.length} con .obj
                                 </span>
                             )}
                         </div>
@@ -240,15 +243,16 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 14 }}>
                                 {mappings.map(map => {
                                     const hasVideo = !!map.videoFile;
+                                    const hasObj = !!map.objFile;
                                     const isActiveLabel = tolerances.some(t => t.enabled && t.className.trim().toLowerCase() === map.label.trim().toLowerCase());
                                     return (
                                         <div key={map.id} style={{
                                             background: '#161b22',
-                                            border: `1px solid ${hasVideo ? '#23863650' : '#30363d'}`,
+                                            border: `1px solid ${(hasVideo || hasObj) ? '#23863650' : '#30363d'}`,
                                             borderRadius: 10, padding: 18,
                                             display: 'flex', flexDirection: 'column', gap: 12,
                                             transition: 'all 0.2s',
-                                            boxShadow: hasVideo ? '0 0 12px rgba(35,134,54,0.15)' : 'none',
+                                            boxShadow: (hasVideo || hasObj) ? '0 0 12px rgba(35,134,54,0.15)' : 'none',
                                         }}>
                                             {/* Header with label and status */}
                                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -262,14 +266,24 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                         {isActiveLabel ? 'Etiqueta Activa' : 'Manual'}
                                                     </span>
                                                 </div>
-                                                <span style={{
-                                                    fontSize: '0.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: 10,
-                                                    background: hasVideo ? '#23863618' : '#f8514910',
-                                                    color: hasVideo ? '#3fb950' : '#f85149',
-                                                    border: `1px solid ${hasVideo ? '#23863640' : '#f8514930'}`,
-                                                }}>
-                                                    {hasVideo ? '🎥 Asignado' : '⚠ Sin vídeo'}
-                                                </span>
+                                                <div style={{ display: 'flex', gap: 6 }}>
+                                                    <span style={{
+                                                        fontSize: '0.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: 10,
+                                                        background: hasVideo ? '#23863618' : '#f8514910',
+                                                        color: hasVideo ? '#3fb950' : '#f85149',
+                                                        border: `1px solid ${hasVideo ? '#23863640' : '#f8514930'}`,
+                                                    }}>
+                                                        {hasVideo ? '🎥 Vídeo' : '⚠ Sin vídeo'}
+                                                    </span>
+                                                    <span style={{
+                                                        fontSize: '0.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: 10,
+                                                        background: hasObj ? '#1f6feb18' : '#f8514910',
+                                                        color: hasObj ? '#58a6ff' : '#f85149',
+                                                        border: `1px solid ${hasObj ? '#1f6feb40' : '#f8514930'}`,
+                                                    }}>
+                                                        {hasObj ? '🧊 .obj' : '⚠ Sin .obj'}
+                                                    </span>
+                                                </div>
                                             </div>
 
                                             {/* Label field */}
@@ -339,6 +353,53 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                             onMouseEnter={(e) => (e.target as HTMLVideoElement).play()}
                                                             onMouseLeave={(e) => { const v = e.target as HTMLVideoElement; v.pause(); v.currentTime = 0; }}
                                                         />
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* OBJ 3D Model file field */}
+                                            <div>
+                                                <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
+                                                    🧊 Modelo 3D (.obj)
+                                                </label>
+                                                <div style={{ display: 'flex', gap: 6 }}>
+                                                    <input
+                                                        type="text" value={map.objFile || ''}
+                                                        placeholder="Selecciona un archivo .obj..."
+                                                        readOnly
+                                                        style={{
+                                                            flex: 1, padding: '8px 12px', background: '#0d1117',
+                                                            border: `1px solid ${map.objBlobUrl ? '#1f6feb' : hasObj ? '#1f6feb40' : '#30363d'}`, borderRadius: 6,
+                                                            color: map.objBlobUrl ? '#58a6ff' : hasObj ? '#58a6ff' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
+                                                            cursor: 'default',
+                                                        }}
+                                                    />
+                                                    <label style={{
+                                                        padding: '8px 14px', background: 'linear-gradient(135deg, #8957e5, #a371f7)', color: '#fff', borderRadius: 6,
+                                                        cursor: 'pointer', fontWeight: 600, fontSize: '0.78rem', display: 'flex',
+                                                        alignItems: 'center', gap: 4, whiteSpace: 'nowrap', flexShrink: 0,
+                                                    }}>
+                                                        📁 Subir .obj
+                                                        <input
+                                                            type="file" accept=".obj,.OBJ"
+                                                            style={{ display: 'none' }}
+                                                            onChange={(e) => {
+                                                                const file = e.target.files?.[0];
+                                                                if (file && onMappingObjUpload) {
+                                                                    onMappingObjUpload(map.id, file);
+                                                                }
+                                                            }}
+                                                        />
+                                                    </label>
+                                                </div>
+                                                {/* OBJ loaded indicator */}
+                                                {map.objBlobUrl && (
+                                                    <div style={{
+                                                        marginTop: 6, padding: '6px 10px', background: '#1f6feb15', border: '1px solid #1f6feb40',
+                                                        borderRadius: 6, display: 'flex', alignItems: 'center', gap: 8,
+                                                    }}>
+                                                        <span style={{ color: '#58a6ff', fontSize: '0.72rem', fontWeight: 700 }}>✓ Modelo .obj cargado</span>
+                                                        <span style={{ fontSize: '0.68rem', color: '#8b949e' }}>{map.objFile}</span>
                                                     </div>
                                                 )}
                                             </div>
