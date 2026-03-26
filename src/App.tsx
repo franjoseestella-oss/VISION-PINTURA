@@ -71,13 +71,67 @@ function App() {
 
   const [mappings, setMappings] = useState<VideoMapping[]>(() => {
     const saved = localStorage.getItem('videoMappings');
+    let parsed: VideoMapping[] | null = null;
     if (saved) {
-      try { return JSON.parse(saved); } catch (_) { /* ignore */ }
+      try { parsed = JSON.parse(saved); } catch (_) { /* ignore */ }
     }
-    return [
-      { id: '1', label: 'Montacargas', videoFile: 'Bastidores.mp4' },
-      { id: '2', label: 'Operario', videoFile: 'Mastiles.mp4' }
-    ];
+
+    const defaultMontacargas = { 
+        videoFile: 'BASTIDOR_MG.mp4',
+        objFile: 'procesodecolgadoMAGELLAN_1.obj',
+        mtlFile: 'procesodecolgadoMAGELLAN_1.mtl',
+        videoBlobUrl: '/videos/BASTIDOR_MG.mp4',
+        objBlobUrl: '/procesodecolgadoMAGELLAN_1.obj',
+        mtlBlobUrl: '/procesodecolgadoMAGELLAN_1.mtl'
+    };
+    
+    const defaultOperario = {
+        videoFile: 'MASTILES_MG_3F.mp4',
+        videoBlobUrl: '/videos/MASTILES_MG_3F.mp4'
+    };
+
+    if (!parsed) {
+      return [
+        { id: '1', label: 'Montacargas', ...defaultMontacargas },
+        { id: '2', label: 'Operario', ...defaultOperario }
+      ];
+    }
+
+    // Preserve existing mappings but inject default media, stripping any dead blob URLs.
+    return parsed.map(m => {
+      const label = m.label.trim().toLowerCase();
+      
+      // Strip dead blob URLs from storage so they don't break the UI
+      let safeObjBlobUrl = m.objBlobUrl && m.objBlobUrl.startsWith('blob:') ? undefined : m.objBlobUrl;
+      let safeMtlBlobUrl = m.mtlBlobUrl && m.mtlBlobUrl.startsWith('blob:') ? undefined : m.mtlBlobUrl;
+      let safeVideoBlobUrl = m.videoBlobUrl && m.videoBlobUrl.startsWith('blob:') ? undefined : m.videoBlobUrl;
+
+      if (label === 'montacargas') {
+        return {
+          ...m,
+          videoFile: defaultMontacargas.videoFile,
+          videoBlobUrl: defaultMontacargas.videoBlobUrl,
+          objFile: defaultMontacargas.objFile,
+          objBlobUrl: defaultMontacargas.objBlobUrl,
+          mtlFile: defaultMontacargas.mtlFile,
+          mtlBlobUrl: defaultMontacargas.mtlBlobUrl,
+        };
+      }
+      if (label === 'operario') {
+         return {
+          ...m,
+          videoFile: defaultOperario.videoFile,
+          videoBlobUrl: defaultOperario.videoBlobUrl,
+        };
+      }
+      
+      return {
+          ...m,
+          objBlobUrl: safeObjBlobUrl,
+          mtlBlobUrl: safeMtlBlobUrl,
+          videoBlobUrl: safeVideoBlobUrl
+      };
+    });
   });
   const [activePlaybackUrl, setActivePlaybackUrl] = useState<string | null>(null);
   const [activePlaybackLabel, setActivePlaybackLabel] = useState<string>('');
@@ -279,6 +333,24 @@ function App() {
       if (!data.ok) return [];
       const preds = Array.isArray(data.predictions) ? data.predictions : [];
 
+      preds.forEach((p: any) => {
+        if (p.points && Array.isArray(p.points) && p.points.length > 0) {
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          p.points.forEach((pt: any) => {
+            if (pt.x < minX) minX = pt.x;
+            if (pt.x > maxX) maxX = pt.x;
+            if (pt.y < minY) minY = pt.y;
+            if (pt.y > maxY) maxY = pt.y;
+          });
+          if (minX <= maxX && minY <= maxY) {
+            p.x = minX + (maxX - minX) / 2;
+            p.y = minY + (maxY - minY) / 2;
+            p.width = maxX - minX;
+            p.height = maxY - minY;
+          }
+        }
+      });
+
       // Convert Roboflow predictions to Detection format with color
       const colors = ['#BD00FF', '#00FFFF', '#FF00FF', '#70FF00', '#FFBD00', '#FF0000', '#0070FF', '#FF00BD', '#00FF70', '#BDFF00'];
       const getColor = (name: string) => {
@@ -339,8 +411,8 @@ function App() {
     mappingLogCountRef.current++;
     if (mappingLogCountRef.current % 60 === 1) {
       const detectedLabels = dets.map(d => d.label.trim());
-      const mappingsWithVideo = mappings.filter(m => m.videoBlobUrl);
-      console.log(`[VIDEO MAPPING] Detected: [${detectedLabels.join(', ')}] | Mappings con vídeo subido: ${mappingsWithVideo.length}/${mappings.length}`);
+      const mappingsWithVideo = mappings.filter(m => m.videoBlobUrl || m.videoFile);
+      console.log(`[VIDEO MAPPING] Detected: [${detectedLabels.join(', ')}] | Mappings con vídeo: ${mappingsWithVideo.length}/${mappings.length}`);
     }
 
     // Find the first detected label that has a mapping WITH an uploaded video (videoBlobUrl)
@@ -348,16 +420,16 @@ function App() {
       const label = det.label.trim();
 
       const mapping = mappings.find(
-        m => m.label.trim().toLowerCase() === label.toLowerCase() && !!m.videoBlobUrl
+        m => m.label.trim().toLowerCase() === label.toLowerCase() && (!!m.videoBlobUrl || !!m.videoFile)
       );
 
-      if (mapping && mapping.videoBlobUrl) {
+      if (mapping && (mapping.videoBlobUrl || mapping.videoFile)) {
         // Only trigger if this is a new detection (avoid re-triggering the same video)
         if (lastTriggeredLabelRef.current !== label) {
           lastTriggeredLabelRef.current = label;
           setActivePlaybackLabel(label);
-          setActivePlaybackUrl(mapping.videoBlobUrl);
-          console.log(`[VIDEO MAPPING] ✅ ${label} detected → Loading uploaded video for: ${mapping.videoFile}`);
+          setActivePlaybackUrl(mapping.videoBlobUrl || (mapping.videoFile ? `/videos/${mapping.videoFile}` : null));
+          console.log(`[VIDEO MAPPING] ✅ ${label} detected → Loading video for: ${mapping.videoFile}`);
         }
         return; // Only trigger first match
       }

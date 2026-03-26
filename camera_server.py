@@ -1924,186 +1924,59 @@ class CameraHandler(BaseHTTPRequestHandler):
         # ── /api/roboflow-classes — Get class names from Roboflow project
         elif path == "/api/roboflow-classes":
             try:
+                import urllib.request
+                import json
+                
                 api_key = "K6YHioHqtuwbsNmR2n7O"
                 workspace = "welding-hqci3"
-                project_slug = "cargar_piezas"
-                model_id = f"{project_slug}/2"  # versión del modelo
+                workflow_id = "detect-count-and-visualize-2"
+                project_slug = "cargar_piezas" # Fallback inicial
+                
+                print(f"[ROBOFLOW] Obteniendo definición de workflow para deducir el proyecto usado...")
+                wf_url = f"https://api.roboflow.com/{workspace}/workflows/{workflow_id}?api_key={api_key}"
+                try:
+                    req_wf = urllib.request.Request(wf_url)
+                    with urllib.request.urlopen(req_wf, timeout=10) as resp:
+                        wf_json = json.loads(resp.read().decode())
+                        # La estructura del schema suele ser una string encapsulada
+                        if "workspace" in wf_json and "workflows" in wf_json["workspace"]:
+                            wf_list = wf_json["workspace"]["workflows"]
+                            if wf_list and "version" in wf_list[0] and "schema" in wf_list[0]["version"]:
+                                import re
+                                schema_str = wf_json["workspace"]["workflows"][0]["version"]["schema"]
+                                # Usamos regex simple contra la string schema
+                                # Ej: "model_id":"cargar_piezas/2" o "modelId":"cargar_piezas/2"
+                                match = re.search(r'"model_?id"\s*:\s*"([^/"]+)/', schema_str, re.IGNORECASE)
+                                if match:
+                                    project_slug = match.group(1).replace("\\", "")
+                                    print(f"[ROBOFLOW] Se encontró el proyecto dinámico dentro del workflow: {project_slug}")
+                except Exception as wf_err:
+                    print(f"[ROBOFLOW] Fallo la extraccion dinamica de workflow: {wf_err}")
+                
+                print(f"[ROBOFLOW] Recuperando clases exactas del proyecto '{project_slug}'...")
+                req_url = f"https://api.roboflow.com/{workspace}/{project_slug}?api_key={api_key}"
+                req = urllib.request.Request(req_url)
+                
                 classes = []
-
-                # ── Método 1: inference_sdk — obtener clases del modelo via infer ──
-                # Usa serverless.roboflow.com que SÍ funciona en esta red
                 try:
-                    from inference_sdk import InferenceHTTPClient
-                    client = InferenceHTTPClient(
-                        api_url="https://detect.roboflow.com",
-                        api_key=api_key
-                    )
-                    
-                    # Intentar obtener info del modelo (puede tener class_names)
-                    try:
-                        model_info = client.get_model_description(model_id)
-                        print(f"[ROBOFLOW] Model info: {type(model_info).__name__}")
-                        if hasattr(model_info, 'class_names') and model_info.class_names:
-                            classes = sorted(model_info.class_names)
-                        elif isinstance(model_info, dict) and 'class_names' in model_info:
-                            classes = sorted(model_info['class_names'])
-                        print(f"[ROBOFLOW] Classes via model_info: {classes}")
-                    except Exception as mi_err:
-                        print(f"[ROBOFLOW] model_info error: {mi_err}")
-
-                    # Si no obtuvimos clases, intentar con una imagen dummy via workflow
-                    if not classes:
-                        import numpy as np
-                        # Crear imagen negra pequeña (50x50) para una inferencia rápida
-                        dummy_img = np.zeros((50, 50, 3), dtype=np.uint8)
-                        temp_dummy = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_dummy_classes.jpg")
-                        cv2.imwrite(temp_dummy, dummy_img)
-                        
-                        try:
-                            result = client.run_workflow(
-                                workspace_name=workspace,
-                                workflow_id="detect-count-and-visualize-2",
-                                images={"image": temp_dummy},
-                                use_cache=True
-                            )
-                            
-                            # Serializar
-                            def to_json_safe(obj):
-                                if obj is None: return None
-                                if isinstance(obj, (str, int, float, bool)): return obj
-                                if isinstance(obj, dict): return {k: to_json_safe(v) for k, v in obj.items()}
-                                if isinstance(obj, list): return [to_json_safe(v) for v in obj]
-                                if hasattr(obj, 'tolist'): return obj.tolist()
-                                if hasattr(obj, '__dict__'): return to_json_safe(obj.__dict__)
-                                try:
-                                    json.dumps(obj); return obj
-                                except: return str(obj)
-                            
-                            result = to_json_safe(result)
-                            r0 = result[0] if isinstance(result, list) and len(result) > 0 else {}
-                            
-                            # Extraer class_names de las predicciones (el workflow puede incluir metadata)
-                            preds_raw = r0.get("predictions", {})
-                            if isinstance(preds_raw, dict):
-                                # La estructura predictions puede tener "image" con metadata
-                                img_meta = preds_raw.get("image", {})
-                                if isinstance(img_meta, dict):
-                                    print(f"[ROBOFLOW] predictions.image keys: {list(img_meta.keys())}")
-                                pred_list = preds_raw.get("predictions", [])
-                            elif isinstance(preds_raw, list):
-                                pred_list = preds_raw
-                            else:
-                                pred_list = []
-                            
-                            # Buscar todas las claves que puedan contener class names
-                            for k, v in r0.items():
-                                print(f"[ROBOFLOW] Workflow key: {k} = {type(v).__name__} ({len(v) if isinstance(v, (list, dict, str)) else v})")
-                            
-                        except Exception as wf_err:
-                            print(f"[ROBOFLOW] Workflow error: {wf_err}")
-                        finally:
-                            try:
-                                if os.path.exists(temp_dummy):
-                                    os.remove(temp_dummy)
-                            except:
-                                pass
-                    
-                    # Si todavía no hay clases, intentar infer directo al modelo
-                    if not classes:
-                        try:
-                            import numpy as np
-                            dummy_img = np.zeros((50, 50, 3), dtype=np.uint8)
-                            temp_dummy2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_dummy_infer.jpg")
-                            cv2.imwrite(temp_dummy2, dummy_img)
-                            
-                            infer_result = client.infer(temp_dummy2, model_id=model_id)
-                            print(f"[ROBOFLOW] Infer result type: {type(infer_result).__name__}")
-                            
-                            # El resultado de infer suele tener predicted_classes o class en las predictions
-                            if isinstance(infer_result, dict):
-                                for k in ['predicted_classes', 'class_names', 'classes']:
-                                    if k in infer_result:
-                                        val = infer_result[k]
-                                        if isinstance(val, list):
-                                            classes = sorted(val)
-                                        elif isinstance(val, dict):
-                                            classes = sorted(val.keys())
-                                        if classes:
-                                            break
-                                # También revisar si existe un campo top-level con info del modelo
-                                print(f"[ROBOFLOW] Infer keys: {list(infer_result.keys()) if isinstance(infer_result, dict) else 'N/A'}")
-                            
-                            try:
-                                if os.path.exists(temp_dummy2):
-                                    os.remove(temp_dummy2)
-                            except:
-                                pass
-                        except Exception as infer_err:
-                            print(f"[ROBOFLOW] Infer error: {infer_err}")
-                    
-                    if classes:
-                        print(f"[ROBOFLOW] Classes via inference_sdk ({len(classes)}): {classes}")
-                        self._json_response({"ok": True, "classes": classes, "project": project_slug, "source": "inference_sdk"})
-                        return
-                        
-                except Exception as sdk_err:
-                    print(f"[ROBOFLOW] inference_sdk error: {sdk_err}")
-                    import traceback
-                    traceback.print_exc()
-
-                # ── Método 2: REST API (api.roboflow.com — puede no funcionar en todas las redes) ──
-                try:
-                    import urllib.request
-                    req_url = f"https://api.roboflow.com/{workspace}/{project_slug}?api_key={api_key}"
-                    print(f"[ROBOFLOW] Trying REST API: {req_url}")
-                    req = urllib.request.Request(req_url)
                     with urllib.request.urlopen(req, timeout=10) as resp:
                         data = json.loads(resp.read().decode())
-                        if "classes" in data:
-                            if isinstance(data["classes"], dict):
-                                classes = sorted(data["classes"].keys())
-                            elif isinstance(data["classes"], list):
-                                classes = sorted(data["classes"])
-                        if classes:
-                            print(f"[ROBOFLOW] Classes via REST ({len(classes)}): {classes}")
-                            self._json_response({"ok": True, "classes": classes, "project": project_slug, "source": "rest_api"})
-                            return
-                except Exception as rest_err:
-                    print(f"[ROBOFLOW] REST API error: {rest_err}")
-
-                # ── Fallback: TODAS las 27 clases del proyecto CARGAR_PIEZAS ──
-                known_classes = [
-                    "1",
-                    "1 CUERPO MG_M2",
-                    "1 CUERPO XL",
-                    "BARRA CARGA",
-                    "BASTIDOR COLGADO",
-                    "CANDENAS BASTIDOR",
-                    "CARRO MG_M2",
-                    "CARRO XL",
-                    "CESTON MASTILES",
-                    "GANCHO BASTIDOR",
-                    "GANCHO CURVO BASTIDOR",
-                    "GANCHO MASTIL",
-                    "M2_LARGO_STD",
-                    "MASTIL COLGADO",
-                    "MASTIL INR 2W MG_M2",
-                    "MASTIL INR 3F MG_M2",
-                    "MASTIL INR MG_M2",
-                    "MASTIL MDL 3F MG_M2",
-                    "MASTIL MDL MG_M2",
-                    "MASTIL OTR 2W MG_M2",
-                    "MASTIL OTR 3F MG_M2",
-                    "MASTIL OTR MG_M2",
-                    "NO HAY PIEZA CARGADA",
-                    "PALLET",
-                    "SOPORTE CADENAS MASTIL",
-                    "VIGA MASTIL",
-                    "XL COMPACT",
-                ]
-                print(f"[ROBOFLOW] Using fallback classes ({len(known_classes)} clases)")
-                print(f"[ROBOFLOW] ⚠ Si faltan clases, añádelas manualmente o verifica la conexión a Roboflow")
-                self._json_response({"ok": True, "classes": known_classes, "source": "fallback", "project": project_slug})
+                        # Estructura devuelta es {"workspace": {...}, "project": {"classes": {...}}}
+                        if "project" in data and "classes" in data["project"]:
+                            c = data["project"]["classes"]
+                            if isinstance(c, dict):
+                                classes = sorted(c.keys())
+                            elif isinstance(c, list):
+                                classes = sorted(c)
+                except Exception as e:
+                    print(f"[ROBOFLOW] Fallo al extraer el proyecto: {e}")
+                
+                if classes:
+                    print(f"[ROBOFLOW] {len(classes)} clases recuperadas con exito.")
+                    self._json_response({"ok": True, "classes": classes, "project": project_slug, "source": "rest_dynamic_api"})
+                    return
+                else:
+                    raise Exception(f"No se pudieron cargar etiquetas del proyecto '{project_slug}'.")
 
             except Exception as e:
                 print(f"[ROBOFLOW CLASSES ERROR] {e}")

@@ -385,6 +385,24 @@ const ImageMeasurement: React.FC = () => {
             if (!data.ok) return [];
             const preds = Array.isArray(data.predictions) ? data.predictions : [];
 
+            preds.forEach((p: any) => {
+                if (p.points && Array.isArray(p.points) && p.points.length > 0) {
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                    p.points.forEach((pt: any) => {
+                        if (pt.x < minX) minX = pt.x;
+                        if (pt.x > maxX) maxX = pt.x;
+                        if (pt.y < minY) minY = pt.y;
+                        if (pt.y > maxY) maxY = pt.y;
+                    });
+                    if (minX <= maxX && minY <= maxY) {
+                        p.x = minX + (maxX - minX) / 2;
+                        p.y = minY + (maxY - minY) / 2;
+                        p.width = maxX - minX;
+                        p.height = maxY - minY;
+                    }
+                }
+            });
+
             // Scale predictions back to original video resolution
             if (downscale < 1 && preds.length > 0) {
                 const upscale = 1 / downscale;
@@ -781,6 +799,25 @@ const ImageMeasurement: React.FC = () => {
             const data = await response.json();
             if (!data.ok) throw new Error(data.error);
             const preds: any[] = Array.isArray(data.predictions) ? data.predictions : [];
+            
+            preds.forEach((p: any) => {
+                if (p.points && Array.isArray(p.points) && p.points.length > 0) {
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                    p.points.forEach((pt: any) => {
+                        if (pt.x < minX) minX = pt.x;
+                        if (pt.x > maxX) maxX = pt.x;
+                        if (pt.y < minY) minY = pt.y;
+                        if (pt.y > maxY) maxY = pt.y;
+                    });
+                    if (minX <= maxX && minY <= maxY) {
+                        p.x = minX + (maxX - minX) / 2;
+                        p.y = minY + (maxY - minY) / 2;
+                        p.width = maxX - minX;
+                        p.height = maxY - minY;
+                    }
+                }
+            });
+
             setDetections(preds);
             if (data.output_image && typeof data.output_image === 'string') {
                 const imgSrc = data.output_image.startsWith('data:')
