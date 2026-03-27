@@ -101,7 +101,8 @@ function App() {
     return parsed.map(m => {
       const label = m.label.trim().toLowerCase();
       
-      // Strip dead blob URLs from storage so they don't break the UI
+      // Strip dead blob: URLs (they expire on browser close).
+      // Permanent /videos/ and /recreacion/ paths are kept as-is.
       let safeObjBlobUrl = m.objBlobUrl && m.objBlobUrl.startsWith('blob:') ? undefined : m.objBlobUrl;
       let safeMtlBlobUrl = m.mtlBlobUrl && m.mtlBlobUrl.startsWith('blob:') ? undefined : m.mtlBlobUrl;
       let safeVideoBlobUrl = m.videoBlobUrl && m.videoBlobUrl.startsWith('blob:') ? undefined : m.videoBlobUrl;
@@ -378,28 +379,75 @@ function App() {
     }
   }, [liveVideoSrc]);
 
+  // ── Helper: save file permanently on server ──────────────────────────────
+  const saveAssetToServer = async (file: File, type: 'video' | 'obj' | 'mtl'): Promise<string | null> => {
+    try {
+      const reader = new FileReader();
+      const b64 = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const resp = await fetch('http://localhost:8765/api/upload-asset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, filename: file.name, data: b64 })
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        console.log(`[UPLOAD] ${file.name} guardado permanentemente → ${data.url}`);
+        return data.url; // e.g. "/videos/MyVideo.mp4" or "/recreacion/Model.obj"
+      } else {
+        console.warn(`[UPLOAD] Servidor respondió error: ${data.error}`);
+        return null;
+      }
+    } catch (e) {
+      console.warn('[UPLOAD] No se pudo guardar en servidor, usando blob URL:', e);
+      return null;
+    }
+  };
+
   // ── Upload a video file for a specific mapping ──
-  const handleMappingVideoUpload = (mappingId: string, file: File) => {
+  const handleMappingVideoUpload = async (mappingId: string, file: File) => {
     const blobUrl = URL.createObjectURL(file);
+    // Use blob URL immediately for playback, then replace with permanent URL
     setMappings(prev => prev.map(m =>
       m.id === mappingId ? { ...m, videoFile: file.name, videoBlobUrl: blobUrl } : m
     ));
+    const permanentUrl = await saveAssetToServer(file, 'video');
+    if (permanentUrl) {
+      setMappings(prev => prev.map(m =>
+        m.id === mappingId ? { ...m, videoBlobUrl: permanentUrl } : m
+      ));
+    }
   };
 
   // ── Upload an .obj file for a specific mapping ──
-  const handleMappingObjUpload = (mappingId: string, file: File) => {
+  const handleMappingObjUpload = async (mappingId: string, file: File) => {
     const blobUrl = URL.createObjectURL(file);
     setMappings(prev => prev.map(m =>
       m.id === mappingId ? { ...m, objFile: file.name, objBlobUrl: blobUrl } : m
     ));
+    const permanentUrl = await saveAssetToServer(file, 'obj');
+    if (permanentUrl) {
+      setMappings(prev => prev.map(m =>
+        m.id === mappingId ? { ...m, objBlobUrl: permanentUrl } : m
+      ));
+    }
   };
 
   // ── Upload an .mtl file for a specific mapping ──
-  const handleMappingMtlUpload = (mappingId: string, file: File) => {
+  const handleMappingMtlUpload = async (mappingId: string, file: File) => {
     const blobUrl = URL.createObjectURL(file);
     setMappings(prev => prev.map(m =>
       m.id === mappingId ? { ...m, mtlFile: file.name, mtlBlobUrl: blobUrl } : m
     ));
+    const permanentUrl = await saveAssetToServer(file, 'mtl');
+    if (permanentUrl) {
+      setMappings(prev => prev.map(m =>
+        m.id === mappingId ? { ...m, mtlBlobUrl: permanentUrl } : m
+      ));
+    }
   };
 
   // ── Check mappings: detected active label → trigger associated video ──

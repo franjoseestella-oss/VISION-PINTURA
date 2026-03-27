@@ -1941,10 +1941,80 @@ class CameraHandler(BaseHTTPRequestHandler):
                 print(traceback.format_exc())
                 self._json_response({"ok": False, "error": str(e)})
 
+        # ── /api/upload-asset — save video/3D model permanently to disk
+        elif path == "/api/upload-asset":
+            try:
+                asset_type = params.get("type", "")   # "video" | "obj" | "mtl"
+                filename   = params.get("filename", "")
+                b64_data   = params.get("data", "")
+
+                if not asset_type or not filename or not b64_data:
+                    self._json_response({"ok": False, "error": "Faltan parámetros: type, filename, data"})
+                    return
+
+                # Strip data URL prefix if present
+                if "," in b64_data:
+                    b64_data = b64_data.split(",", 1)[1]
+
+                file_bytes = base64.b64decode(b64_data)
+
+                # Determine destination directory relative to this script (project root)
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                if asset_type == "video":
+                    dest_dir = os.path.join(base_dir, "public", "videos")
+                    url_prefix = "/videos"
+                elif asset_type in ("obj", "mtl"):
+                    dest_dir = os.path.join(base_dir, "public", "recreacion")
+                    url_prefix = "/recreacion"
+                else:
+                    self._json_response({"ok": False, "error": f"Tipo desconocido: {asset_type}"})
+                    return
+
+                os.makedirs(dest_dir, exist_ok=True)
+
+                # Sanitize filename (no path traversal)
+                safe_name = os.path.basename(filename)
+                dest_path = os.path.join(dest_dir, safe_name)
+
+                with open(dest_path, "wb") as f:
+                    f.write(file_bytes)
+
+                permanent_url = f"{url_prefix}/{safe_name}"
+                print(f"[UPLOAD-ASSET] Guardado: {dest_path} ({len(file_bytes)//1024} KB) → {permanent_url}")
+                self._json_response({"ok": True, "url": permanent_url, "filename": safe_name})
+
+            except Exception as e:
+                print(f"[UPLOAD-ASSET ERROR] {e}")
+                self._json_response({"ok": False, "error": str(e)})
+
+        # ── /api/list-assets — list saved videos and 3D models
+        elif path == "/api/list-assets":
+            try:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                videos_dir = os.path.join(base_dir, "public", "videos")
+                models_dir = os.path.join(base_dir, "public", "recreacion")
+
+                videos = []
+                if os.path.isdir(videos_dir):
+                    videos = [f for f in os.listdir(videos_dir) if f.lower().endswith(('.mp4', '.webm', '.avi', '.mov'))]
+
+                models = []
+                if os.path.isdir(models_dir):
+                    for root, dirs, files in os.walk(models_dir):
+                        for f in files:
+                            if f.lower().endswith(('.obj', '.mtl')):
+                                rel = os.path.relpath(os.path.join(root, f), models_dir).replace("\\", "/")
+                                models.append(rel)
+
+                self._json_response({"ok": True, "videos": videos, "models": models})
+            except Exception as e:
+                self._json_response({"ok": False, "error": str(e)})
+
         # ── /api/disconnect
         elif path == "/api/disconnect":
             disconnect_camera()
             self._json_response({"ok": True})
+
 
         # ── /api/roboflow-classes — Get class names from Roboflow project
         elif path == "/api/roboflow-classes":
