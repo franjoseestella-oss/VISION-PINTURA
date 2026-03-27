@@ -439,15 +439,21 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                 </label>
                                                 <div style={{ display: 'flex', gap: 6 }}>
                                                     <input
-                                                        type="text" value={map.videoFile}
-                                                        onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, videoFile: e.target.value } : m))}
-                                                        placeholder="Selecciona un vídeo..."
-                                                        readOnly
+                                                    <input
+                                                        type="text"
+                                                        value={map.videoBlobUrl || map.videoFile || ''}
+                                                        onChange={(e) => {
+                                                            const val = e.target.value;
+                                                            setMappings(mappings.map(m => m.id === map.id
+                                                                ? { ...m, videoFile: val, videoBlobUrl: val }
+                                                                : m
+                                                            ));
+                                                        }}
+                                                        placeholder="Ruta del vídeo, ej: C:\\Videos\\MiVideo.mp4"
                                                         style={{
                                                             flex: 1, padding: '8px 12px', background: '#0d1117',
                                                             border: `1px solid ${map.videoBlobUrl ? '#238636' : hasVideo ? '#23863640' : '#30363d'}`, borderRadius: 6,
                                                             color: map.videoBlobUrl ? '#3fb950' : hasVideo ? '#3fb950' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
-                                                            cursor: 'default',
                                                         }}
                                                     />
                                                     <label style={{
@@ -493,14 +499,20 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                 </label>
                                                 <div style={{ display: 'flex', gap: 6 }}>
                                                     <input
-                                                        type="text" value={map.objFile || ''}
-                                                        placeholder="Selecciona un archivo .obj..."
-                                                        readOnly
+                                                        type="text"
+                                                        value={map.objBlobUrl || map.objFile || ""}
+                                                        onChange={(e) => {
+                                                            const val = e.target.value;
+                                                            setMappings(mappings.map(m => m.id === map.id
+                                                                ? { ...m, objFile: val, objBlobUrl: val }
+                                                                : m
+                                                            ));
+                                                        }}
+                                                        placeholder="Ruta del .obj, ej: C:\\Modelos\\Model.obj"
                                                         style={{
                                                             flex: 1, padding: '8px 12px', background: '#0d1117',
                                                             border: `1px solid ${map.objBlobUrl ? '#1f6feb' : hasObj ? '#1f6feb40' : '#30363d'}`, borderRadius: 6,
                                                             color: map.objBlobUrl ? '#58a6ff' : hasObj ? '#58a6ff' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
-                                                            cursor: 'default',
                                                         }}
                                                     />
                                                     <label style={{
@@ -565,14 +577,21 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                     </label>
                                                     <div style={{ display: 'flex', gap: 6 }}>
                                                         <input
-                                                            type="text" value={map.mtlFile || ''}
-                                                            placeholder="Selecciona un archivo .mtl..."
-                                                            readOnly
+                                                        <input
+                                                            type="text"
+                                                            value={map.mtlBlobUrl || map.mtlFile || ''}
+                                                            onChange={(e) => {
+                                                                const val = e.target.value;
+                                                                setMappings(mappings.map(m => m.id === map.id
+                                                                    ? { ...m, mtlFile: val, mtlBlobUrl: val }
+                                                                    : m
+                                                                ));
+                                                            }}
+                                                            placeholder="Ruta del .mtl, ej: C:\\Modelos\\Model.mtl"
                                                             style={{
                                                                 flex: 1, padding: '8px 12px', background: '#0d1117',
                                                                 border: `1px solid ${map.mtlBlobUrl ? '#238636' : '#30363d'}`, borderRadius: 6,
                                                                 color: map.mtlBlobUrl ? '#3fb950' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
-                                                                cursor: 'default',
                                                             }}
                                                         />
                                                         <label style={{
@@ -726,10 +745,8 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                 <td style={{ padding: '8px 12px', textAlign: 'center' }}>
                                                     <input
                                                         type="number" step="0.01" value={tol.measuredValue}
-                                                        readOnly
                                                         style={{
                                                             width: '100%', padding: '6px 8px', background: '#161b22', border: '1px solid #30363d',
-                                                            borderRadius: 4, color: '#8b949e', fontSize: '0.82rem', textAlign: 'center', cursor: 'default',
                                                         }}
                                                     />
                                                 </td>
