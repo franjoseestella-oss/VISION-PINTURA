@@ -790,11 +790,19 @@ const ImageMeasurement: React.FC = () => {
 
     const loadDetections = async (src: string) => {
         setIsProcessing(true);
+        console.log(`[Roboflow] loadDetections called, src length: ${src?.length ?? 0}, starts with: ${src?.substring(0, 30)}`);
+        if (!src || src.length < 10) {
+            console.error("[Roboflow] src vacío o inválido, cancelando petición");
+            setIsProcessing(false);
+            return;
+        }
         try {
+            const bodyPayload = JSON.stringify({ image: src });
+            console.log(`[Roboflow] Enviando petición, body size: ${bodyPayload.length}`);
             const response = await fetch("http://localhost:8765/api/measure/roboflow", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ image: src })
+                body: bodyPayload
             });
             const data = await response.json();
             if (!data.ok) throw new Error(data.error);

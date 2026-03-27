@@ -1393,12 +1393,40 @@ class CameraHandler(BaseHTTPRequestHandler):
             
         parsed = urlparse(self.path)
         path = parsed.path
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length) if length > 0 else b"{}"
+
+        # ── Robust body reading ─────────────────────────────────────────────
+        length_str = self.headers.get("Content-Length", "0").strip()
+        try:
+            length = int(length_str)
+        except ValueError:
+            length = 0
+
+        if length > 0:
+            # Read in a loop to handle large payloads (sockets may deliver data in chunks)
+            body_parts = []
+            remaining = length
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    break
+                body_parts.append(chunk)
+                remaining -= len(chunk)
+            body = b"".join(body_parts)
+        else:
+            body = b"{}"
+
+        # Debug: show raw body start
+        body_preview = body[:80].decode("utf-8", errors="replace")
+        print(f"[POST] {path} | Content-Length={length_str} | body_actual={len(body)} bytes | body[:80]={body_preview!r}")
+
         try:
             params = json.loads(body)
-        except Exception:
+            img_val = params.get("image", "")
+            print(f"[POST] keys={list(params.keys())} | image_len={len(img_val)}")
+        except Exception as e:
+            print(f"[POST] JSON parse error: {e}")
             params = {}
+
 
 
 
@@ -1735,77 +1763,74 @@ class CameraHandler(BaseHTTPRequestHandler):
 
         # ── /api/measure/roboflow
         elif path == "/api/measure/roboflow":
-            from inference_sdk import InferenceHTTPClient
+            import requests
             import traceback
 
             try:
                 b64_str = params.get("image", "")
+                if not b64_str:
+                    print("[Roboflow] ERROR: No hay datos de imagen en params")
+                    self._json_response({"ok": False, "error": "No image data sent"})
+                    return
+
                 if "," in b64_str:
-                    b64_str = b64_str.split(",")[1]
+                    b64_str = b64_str.split(",", 1)[1]
 
                 img_data = base64.b64decode(b64_str)
-                nparr = np.frombuffer(img_data, np.uint8)
-                img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                img_h, img_w = img_cv.shape[:2]
+                if len(img_data) == 0:
+                    print("[Roboflow] ERROR: Decodificación base64 vacía")
+                    self._json_response({"ok": False, "error": "Imagen vacía"})
+                    return
 
-                temp_path = "temp_roboflow.jpg"
-                cv2.imwrite(temp_path, img_cv)
+                # Send directly as base64 to avoid local disk issues if possible, 
+                # or use a temp file compatible with the REST API.
+                api_key = "K6YHioHqtuwbsNmR2n7O"
+                workspace = "welding-hqci3"
+                workflow_id = "detect-count-and-visualize-2"
+                url = f"https://detect.roboflow.com/infer/workflows/{workspace}/{workflow_id}"
 
-                client = InferenceHTTPClient(
-                    api_url="https://serverless.roboflow.com",
-                    api_key="K6YHioHqtuwbsNmR2n7O"
-                )
+                payload = {
+                    "api_key": api_key,
+                    "inputs": {
+                        "image": {"type": "base64", "value": b64_str}
+                    }
+                }
 
-                result_raw = client.run_workflow(
-                    workspace_name="welding-hqci3",
-                    workflow_id="detect-count-and-visualize-2",
-                    images={"image": temp_path},
-                    use_cache=True
-                )
+                print(f"[Roboflow] POST {url} (img length: {len(b64_str)})")
+                resp = requests.post(url, json=payload, timeout=30)
+                resp.raise_for_status()
+                data_raw = resp.json()
 
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-
-                # Serializar todo de forma segura
-                def to_json(obj):
-                    if obj is None: return None
-                    if isinstance(obj, (str, int, float, bool)): return obj
-                    if isinstance(obj, dict): return {k: to_json(v) for k, v in obj.items()}
-                    if isinstance(obj, list): return [to_json(v) for v in obj]
-                    if hasattr(obj, 'tolist'): return obj.tolist()  # numpy
-                    if hasattr(obj, '__dict__'): return to_json(obj.__dict__)
-                    try:
-                        import json; json.dumps(obj); return obj
-                    except: return str(obj)
-
-                result = to_json(result_raw)
-
-                # result es lista: [{count_objects, output_image, predictions:{image, predictions:[...]}}]
-                r0 = result[0] if (isinstance(result, list) and len(result) > 0) else {}
-
-                # Extraer output_image
-                output_image = r0.get("output_image")  # string base64 JPEG
-
-                # Extraer predicciones
-                preds_raw = r0.get("predictions", {})
-                if isinstance(preds_raw, dict):
-                    predictions = preds_raw.get("predictions", [])
-                elif isinstance(preds_raw, list):
-                    predictions = preds_raw
-                else:
+                # Extract outputs from workflow response
+                # Roboflow workflows usually return {"outputs": [{"predictions": {...}, "output_image": "..."}]}
+                if "outputs" in data_raw and len(data_raw["outputs"]) > 0:
+                    r0 = data_raw["outputs"][0]
+                    # The workflow "detect-count-and-visualize-2" might have different output keys.
+                    # We look for 'predictions' and 'output_image'.
                     predictions = []
+                    output_image = r0.get("output_image")
 
-                print(f"[Roboflow] {len(predictions)} predicciones | output_image: {'SI' if output_image else 'NO'}")
+                    # Try to find predictions in common output keys
+                    for k in r0.keys():
+                        if isinstance(r0[k], dict) and "predictions" in r0[k]:
+                            predictions = r0[k]["predictions"]
+                            break
+                        if k == "predictions" and isinstance(r0[k], list):
+                            predictions = r0[k]
+                            break
 
-                self._json_response({
-                    "ok": True,
-                    "output_image": output_image,
-                    "predictions": predictions,
-                    "image_width": img_w,
-                    "image_height": img_h
-                })
+                    print(f"[Roboflow] OK: {len(predictions)} predicciones encontradas")
+                    self._json_response({
+                        "ok": True,
+                        "output_image": output_image,
+                        "predictions": predictions
+                    })
+                else:
+                    print(f"[Roboflow] Error: No se recibieron outputs correctos: {data_raw}")
+                    self._json_response({"ok": False, "error": "No se recibieron predicciones del servidor Roboflow"})
 
             except Exception as e:
+                print(f"[Roboflow ERROR] {e}")
                 print(traceback.format_exc())
                 self._json_response({"ok": False, "error": str(e)})
 
@@ -1925,7 +1950,6 @@ class CameraHandler(BaseHTTPRequestHandler):
         elif path == "/api/roboflow-classes":
             try:
                 import urllib.request
-                import json
                 
                 api_key = "K6YHioHqtuwbsNmR2n7O"
                 workspace = "welding-hqci3"
