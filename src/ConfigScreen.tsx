@@ -439,7 +439,6 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                 </label>
                                                 <div style={{ display: 'flex', gap: 6 }}>
                                                     <input
-                                                    <input
                                                         type="text"
                                                         value={map.videoBlobUrl || map.videoFile || ''}
                                                         onChange={(e) => {
@@ -576,7 +575,6 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                         🎨 Material (.mtl) — opcional
                                                     </label>
                                                     <div style={{ display: 'flex', gap: 6 }}>
-                                                        <input
                                                         <input
                                                             type="text"
                                                             value={map.mtlBlobUrl || map.mtlFile || ''}
