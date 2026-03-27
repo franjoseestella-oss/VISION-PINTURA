@@ -20,13 +20,10 @@ interface VideoMapping {
     objElementName?: string;
     videoFile: string;
     videoBlobUrl?: string;
-    videoPath?: string;
     objFile?: string;
     objBlobUrl?: string;
-    objPath?: string;
     mtlFile?: string;
     mtlBlobUrl?: string;
-    mtlPath?: string;
     modelSpecs?: ModelSpecs;
 }
 
@@ -443,19 +440,14 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                 <div style={{ display: 'flex', gap: 6 }}>
                                                     <input
                                                         type="text"
-                                                        value={map.videoBlobUrl || map.videoFile || ''}
-                                                        onChange={(e) => {
-                                                            const val = e.target.value;
-                                                            setMappings(mappings.map(m => m.id === map.id
-                                                                ? { ...m, videoFile: val, videoBlobUrl: val }
-                                                                : m
-                                                            ));
-                                                        }}
-                                                        placeholder="Ruta del vídeo, ej: C:\\Videos\\MiVideo.mp4"
+                                                        type="text" value={map.videoFile}
+                                                        placeholder="Selecciona un vídeo..."
+                                                        readOnly
                                                         style={{
                                                             flex: 1, padding: '8px 12px', background: '#0d1117',
                                                             border: `1px solid ${map.videoBlobUrl ? '#238636' : hasVideo ? '#23863640' : '#30363d'}`, borderRadius: 6,
                                                             color: map.videoBlobUrl ? '#3fb950' : hasVideo ? '#3fb950' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
+                                                            cursor: 'default',
                                                         }}
                                                     />
                                                     <label style={{
@@ -476,24 +468,6 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                         />
                                                     </label>
                                                 </div>
-                                                {/* Video PATH field */}
-                                                <div style={{ marginTop: 6 }}>
-                                                    <label style={{ fontSize: '0.68rem', color: '#8b949e', display: 'block', marginBottom: 2, fontWeight: 600 }}>
-                                                        📂 PATH del Vídeo
-                                                    </label>
-                                                    <input
-                                                        type="text"
-                                                        value={map.videoPath || ''}
-                                                        onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, videoPath: e.target.value } : m))}
-                                                        placeholder="Ej: C:\Videos\ColgadoBastidor.mp4"
-                                                        style={{
-                                                            width: '100%', padding: '6px 10px', background: '#161b22',
-                                                            border: `1px solid ${map.videoPath ? '#238636' : '#30363d'}`, borderRadius: 5,
-                                                            color: map.videoPath ? '#3fb950' : '#8b949e', fontSize: '0.75rem', boxSizing: 'border-box',
-                                                            fontFamily: 'monospace',
-                                                        }}
-                                                    />
-                                                </div>
                                             </div>
 
                                             {/* OBJ 3D Model file field */}
@@ -504,19 +478,14 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                 <div style={{ display: 'flex', gap: 6 }}>
                                                     <input
                                                         type="text"
-                                                        value={map.objBlobUrl || map.objFile || ""}
-                                                        onChange={(e) => {
-                                                            const val = e.target.value;
-                                                            setMappings(mappings.map(m => m.id === map.id
-                                                                ? { ...m, objFile: val, objBlobUrl: val }
-                                                                : m
-                                                            ));
-                                                        }}
-                                                        placeholder="Ruta del .obj, ej: C:\\Modelos\\Model.obj"
+                                                        type="text" value={map.objFile || ''}
+                                                        placeholder="Selecciona un archivo .obj..."
+                                                        readOnly
                                                         style={{
                                                             flex: 1, padding: '8px 12px', background: '#0d1117',
                                                             border: `1px solid ${map.objBlobUrl ? '#1f6feb' : hasObj ? '#1f6feb40' : '#30363d'}`, borderRadius: 6,
                                                             color: map.objBlobUrl ? '#58a6ff' : hasObj ? '#58a6ff' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
+                                                            cursor: 'default',
                                                         }}
                                                     />
                                                     <label style={{
@@ -536,24 +505,6 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                             }}
                                                         />
                                                     </label>
-                                                </div>
-                                                {/* OBJ PATH field */}
-                                                <div style={{ marginTop: 6 }}>
-                                                    <label style={{ fontSize: '0.68rem', color: '#8b949e', display: 'block', marginBottom: 2, fontWeight: 600 }}>
-                                                        📂 PATH del .obj
-                                                    </label>
-                                                    <input
-                                                        type="text"
-                                                        value={map.objPath || ''}
-                                                        onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, objPath: e.target.value } : m))}
-                                                        placeholder="Ej: C:\Modelos\Colocaciondeplaca.obj"
-                                                        style={{
-                                                            width: '100%', padding: '6px 10px', background: '#161b22',
-                                                            border: `1px solid ${map.objPath ? '#1f6feb' : '#30363d'}`, borderRadius: 5,
-                                                            color: map.objPath ? '#58a6ff' : '#8b949e', fontSize: '0.75rem', boxSizing: 'border-box',
-                                                            fontFamily: 'monospace',
-                                                        }}
-                                                    />
                                                 </div>
                                                 {/* OBJ loaded indicator */}
                                                 {map.objBlobUrl && (
@@ -600,19 +551,14 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                     <div style={{ display: 'flex', gap: 6 }}>
                                                         <input
                                                             type="text"
-                                                            value={map.mtlBlobUrl || map.mtlFile || ''}
-                                                            onChange={(e) => {
-                                                                const val = e.target.value;
-                                                                setMappings(mappings.map(m => m.id === map.id
-                                                                    ? { ...m, mtlFile: val, mtlBlobUrl: val }
-                                                                    : m
-                                                                ));
-                                                            }}
-                                                            placeholder="Ruta del .mtl, ej: C:\\Modelos\\Model.mtl"
+                                                            type="text" value={map.mtlFile || ''}
+                                                            placeholder="Selecciona un archivo .mtl..."
+                                                            readOnly
                                                             style={{
                                                                 flex: 1, padding: '8px 12px', background: '#0d1117',
                                                                 border: `1px solid ${map.mtlBlobUrl ? '#238636' : '#30363d'}`, borderRadius: 6,
                                                                 color: map.mtlBlobUrl ? '#3fb950' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
+                                                                cursor: 'default',
                                                             }}
                                                         />
                                                         <label style={{
@@ -632,24 +578,6 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                                 }}
                                                             />
                                                         </label>
-                                                    </div>
-                                                    {/* MTL PATH field */}
-                                                    <div style={{ marginTop: 6 }}>
-                                                        <label style={{ fontSize: '0.68rem', color: '#8b949e', display: 'block', marginBottom: 2, fontWeight: 600 }}>
-                                                            📂 PATH del .mtl
-                                                        </label>
-                                                        <input
-                                                            type="text"
-                                                            value={map.mtlPath || ''}
-                                                            onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, mtlPath: e.target.value } : m))}
-                                                            placeholder="Ej: C:\Modelos\Colocaciondeplaca.mtl"
-                                                            style={{
-                                                                width: '100%', padding: '6px 10px', background: '#161b22',
-                                                                border: `1px solid ${map.mtlPath ? '#238636' : '#30363d'}`, borderRadius: 5,
-                                                                color: map.mtlPath ? '#3fb950' : '#8b949e', fontSize: '0.75rem', boxSizing: 'border-box',
-                                                                fontFamily: 'monospace',
-                                                            }}
-                                                        />
                                                     </div>
                                                 </div>
                                             </div>
