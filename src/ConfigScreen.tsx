@@ -20,10 +20,13 @@ interface VideoMapping {
     objElementName?: string;
     videoFile: string;
     videoBlobUrl?: string;
+    videoPath?: string;
     objFile?: string;
     objBlobUrl?: string;
+    objPath?: string;
     mtlFile?: string;
     mtlBlobUrl?: string;
+    mtlPath?: string;
     modelSpecs?: ModelSpecs;
 }
 
@@ -473,22 +476,24 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                         />
                                                     </label>
                                                 </div>
-                                                {/* Video loaded indicator */}
-                                                {map.videoBlobUrl && (
-                                                    <div style={{
-                                                        marginTop: 6, padding: '6px 10px', background: '#23863620', border: '1px solid #23863650',
-                                                        borderRadius: 6, display: 'flex', alignItems: 'center', gap: 8,
-                                                    }}>
-                                                        <span style={{ color: '#3fb950', fontSize: '0.72rem', fontWeight: 700 }}>✓ Vídeo cargado</span>
-                                                        <video
-                                                            src={map.videoBlobUrl}
-                                                            style={{ height: 40, borderRadius: 4, border: '1px solid #30363d' }}
-                                                            muted
-                                                            onMouseEnter={(e) => (e.target as HTMLVideoElement).play()}
-                                                            onMouseLeave={(e) => { const v = e.target as HTMLVideoElement; v.pause(); v.currentTime = 0; }}
-                                                        />
-                                                    </div>
-                                                )}
+                                                {/* Video PATH field */}
+                                                <div style={{ marginTop: 6 }}>
+                                                    <label style={{ fontSize: '0.68rem', color: '#8b949e', display: 'block', marginBottom: 2, fontWeight: 600 }}>
+                                                        📂 PATH del Vídeo
+                                                    </label>
+                                                    <input
+                                                        type="text"
+                                                        value={map.videoPath || ''}
+                                                        onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, videoPath: e.target.value } : m))}
+                                                        placeholder="Ej: C:\Videos\ColgadoBastidor.mp4"
+                                                        style={{
+                                                            width: '100%', padding: '6px 10px', background: '#161b22',
+                                                            border: `1px solid ${map.videoPath ? '#238636' : '#30363d'}`, borderRadius: 5,
+                                                            color: map.videoPath ? '#3fb950' : '#8b949e', fontSize: '0.75rem', boxSizing: 'border-box',
+                                                            fontFamily: 'monospace',
+                                                        }}
+                                                    />
+                                                </div>
                                             </div>
 
                                             {/* OBJ 3D Model file field */}
@@ -531,6 +536,24 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                             }}
                                                         />
                                                     </label>
+                                                </div>
+                                                {/* OBJ PATH field */}
+                                                <div style={{ marginTop: 6 }}>
+                                                    <label style={{ fontSize: '0.68rem', color: '#8b949e', display: 'block', marginBottom: 2, fontWeight: 600 }}>
+                                                        📂 PATH del .obj
+                                                    </label>
+                                                    <input
+                                                        type="text"
+                                                        value={map.objPath || ''}
+                                                        onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, objPath: e.target.value } : m))}
+                                                        placeholder="Ej: C:\Modelos\Colocaciondeplaca.obj"
+                                                        style={{
+                                                            width: '100%', padding: '6px 10px', background: '#161b22',
+                                                            border: `1px solid ${map.objPath ? '#1f6feb' : '#30363d'}`, borderRadius: 5,
+                                                            color: map.objPath ? '#58a6ff' : '#8b949e', fontSize: '0.75rem', boxSizing: 'border-box',
+                                                            fontFamily: 'monospace',
+                                                        }}
+                                                    />
                                                 </div>
                                                 {/* OBJ loaded indicator */}
                                                 {map.objBlobUrl && (
@@ -609,6 +632,24 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                                 }}
                                                             />
                                                         </label>
+                                                    </div>
+                                                    {/* MTL PATH field */}
+                                                    <div style={{ marginTop: 6 }}>
+                                                        <label style={{ fontSize: '0.68rem', color: '#8b949e', display: 'block', marginBottom: 2, fontWeight: 600 }}>
+                                                            📂 PATH del .mtl
+                                                        </label>
+                                                        <input
+                                                            type="text"
+                                                            value={map.mtlPath || ''}
+                                                            onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, mtlPath: e.target.value } : m))}
+                                                            placeholder="Ej: C:\Modelos\Colocaciondeplaca.mtl"
+                                                            style={{
+                                                                width: '100%', padding: '6px 10px', background: '#161b22',
+                                                                border: `1px solid ${map.mtlPath ? '#238636' : '#30363d'}`, borderRadius: 5,
+                                                                color: map.mtlPath ? '#3fb950' : '#8b949e', fontSize: '0.75rem', boxSizing: 'border-box',
+                                                                fontFamily: 'monospace',
+                                                            }}
+                                                        />
                                                     </div>
                                                 </div>
                                             </div>
