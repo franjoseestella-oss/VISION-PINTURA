@@ -59,10 +59,16 @@ function App() {
   const [modelActive, setModelActive] = useState(true);
   const [cameraEnabled, setCameraEnabled] = useState(false);
 
+  // ── Facial Login Overlay State ──
+  const [appLocked, setAppLocked] = useState(true);
+  const [lockStatus, setLockStatus] = useState<'idle' | 'verifying' | 'success' | 'error'>('idle');
+  const [lockMessage, setLockMessage] = useState<string>('Esperando cámara...');
+  const [lockGreeting, setLockGreeting] = useState<string | null>(null);
+
   // ── Uploaded video source for Live Inference ──
   const [liveVideoSrc, setLiveVideoSrc] = useState<string | null>(null);
   const [liveVideoPlaying, setLiveVideoPlaying] = useState(false);
-  const [liveVideoLoading, setLiveVideoLoading] = useState(false);
+
   const [liveVideoError, setLiveVideoError] = useState<string | null>(null);
   const liveUploadedVideoRef = useRef<HTMLVideoElement>(null);
   const liveFileInputRef = useRef<HTMLInputElement>(null);
@@ -99,7 +105,6 @@ function App() {
 
     // Preserve existing mappings but inject default media, stripping any dead blob URLs.
     return parsed.map(m => {
-      const label = m.label.trim().toLowerCase();
       
       // Strip dead blob: URLs (they expire on browser close).
       // Permanent /videos/ and /recreacion/ paths are kept as-is.
@@ -107,25 +112,6 @@ function App() {
       let safeMtlBlobUrl = m.mtlBlobUrl && m.mtlBlobUrl.startsWith('blob:') ? undefined : m.mtlBlobUrl;
       let safeVideoBlobUrl = m.videoBlobUrl && m.videoBlobUrl.startsWith('blob:') ? undefined : m.videoBlobUrl;
 
-      if (label === 'montacargas') {
-        return {
-          ...m,
-          videoFile: defaultMontacargas.videoFile,
-          videoBlobUrl: defaultMontacargas.videoBlobUrl,
-          objFile: defaultMontacargas.objFile,
-          objBlobUrl: defaultMontacargas.objBlobUrl,
-          mtlFile: defaultMontacargas.mtlFile,
-          mtlBlobUrl: defaultMontacargas.mtlBlobUrl,
-        };
-      }
-      if (label === 'operario') {
-         return {
-          ...m,
-          videoFile: defaultOperario.videoFile,
-          videoBlobUrl: defaultOperario.videoBlobUrl,
-        };
-      }
-      
       return {
           ...m,
           objBlobUrl: safeObjBlobUrl,
@@ -157,9 +143,53 @@ function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
+  // ── Facial Login Polling ──
+  useEffect(() => {
+    if (!appLocked) return;
+
+    let intervalId: NodeJS.Timeout;
+
+    const verifyFace = async () => {
+      setLockStatus('verifying');
+      setLockMessage('Verificando identidad...');
+      try {
+        const res = await fetch('http://localhost:8765/api/face/verify', { method: 'POST' });
+        const data = await res.json();
+        
+        if (data.ok) {
+          setLockStatus('success');
+          setLockGreeting(`¡Bienvenido, ${data.fullname || data.username}!`);
+          setLockMessage('Identidad confirmada. Desbloqueando...');
+          clearInterval(intervalId);
+          // ── Apagar cámara tras login exitoso ──
+          fetch('http://localhost:8765/api/disconnect', { method: 'POST' }).catch(() => {});
+          setCameraEnabled(false); // Apaga del lado de React (webcam real)
+          setTimeout(() => setAppLocked(false), 2000); // Unlock after 2s
+        } else {
+          setLockStatus('error');
+          if (data.error === "No hay usuarios registrados") {
+            setLockMessage('Aviso: No hay usuarios registrados.');
+          } else {
+            setLockMessage(data.error || 'Rostro no reconocido');
+          }
+        }
+      } catch (err) {
+        setLockStatus('error');
+        setLockMessage('Error conectando con el servidor facial.');
+      }
+    };
+
+    intervalId = setInterval(verifyFace, 2500); // Check every 2.5s
+    verifyFace(); // initial fire
+
+    return () => clearInterval(intervalId);
+  }, [appLocked]);
+
 
 
   useEffect(() => {
+    let activeStream: MediaStream | null = null;
+    
     // Simulating camera feed via webcam
     async function initCamera() {
       if (!cameraEnabled) {
@@ -172,6 +202,7 @@ function App() {
       }
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        activeStream = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
         }
@@ -183,7 +214,9 @@ function App() {
 
     // Cleanup on unmount
     return () => {
-      if (videoRef.current?.srcObject) {
+      if (activeStream) {
+        activeStream.getTracks().forEach(track => track.stop());
+      } else if (videoRef.current?.srcObject) {
         const stream = videoRef.current.srcObject as MediaStream;
         stream.getTracks().forEach(track => track.stop());
       }
@@ -223,63 +256,23 @@ function App() {
     setLiveDetections([]);
     lastTriggeredLabelRef.current = null;
 
-    // Check if format is browser-compatible
-    const ext = file.name.split('.').pop()?.toLowerCase() || '';
-    const browserFormats = ['mp4', 'webm', 'ogg', 'ogv'];
-
-    if (browserFormats.includes(ext)) {
-      // Direct playback — validate first
-      try {
-        const blobUrl = URL.createObjectURL(file);
-        const testVideo = document.createElement('video');
-        testVideo.preload = 'metadata';
-        await new Promise<void>((resolve, reject) => {
-          testVideo.onloadedmetadata = () => resolve();
-          testVideo.onerror = () => reject(new Error(
-            `El navegador no puede reproducir este vídeo (${ext}). Puede que el códec no sea compatible.`
-          ));
-          setTimeout(() => reject(new Error('Tiempo agotado al cargar el vídeo.')), 10000);
-          testVideo.src = blobUrl;
-        });
-        testVideo.src = '';
-        startLiveVideo(blobUrl);
-      } catch (err: any) {
-        console.error('Video load error:', err);
-        setLiveVideoError(err.message);
-      }
-    } else {
-      // AVI, MOV, WMV, MKV etc. → convert via backend
-      setLiveVideoLoading(true);
-      setLiveVideoError(null);
-      try {
-        const reader = new FileReader();
-        const b64 = await new Promise<string>((resolve, reject) => {
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = () => reject(new Error('Error leyendo el archivo de vídeo'));
-          reader.readAsDataURL(file);
-        });
-
-        const resp = await fetch('http://localhost:8765/api/video/convert', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ video: b64 })
-        });
-
-        if (!resp.ok) throw new Error(`Error del servidor: ${resp.status} ${resp.statusText}`);
-
-        const data = await resp.json();
-        if (!data.ok) throw new Error(data.error || 'Error desconocido en la conversión');
-
-        // Create blob URL from returned MP4
-        const mp4Bytes = Uint8Array.from(atob(data.mp4_base64), c => c.charCodeAt(0));
-        const blob = new Blob([mp4Bytes], { type: 'video/mp4' });
-        startLiveVideo(URL.createObjectURL(blob));
-      } catch (err: any) {
-        console.error('Video conversion error:', err);
-        setLiveVideoError(`Error convirtiendo vídeo: ${err.message}`);
-      } finally {
-        setLiveVideoLoading(false);
-      }
+    // Ya no comprobamos formatos oscuros ni los convertimos, asumimos siempre MP4 nativo
+    try {
+      const blobUrl = URL.createObjectURL(file);
+      // Validamos brevemente para evitar pantallazos negros
+      const testVideo = document.createElement('video');
+      testVideo.preload = 'metadata';
+      await new Promise<void>((resolve, reject) => {
+        testVideo.onloadedmetadata = () => resolve();
+        testVideo.onerror = () => reject(new Error('El navegador no puede reproducir este vídeo. Asegúrate de que es un MP4 estándar.'));
+        setTimeout(() => reject(new Error('Tiempo agotado al cargar el vídeo.')), 10000);
+        testVideo.src = blobUrl;
+      });
+      testVideo.src = '';
+      startLiveVideo(blobUrl);
+    } catch (err: any) {
+      console.error('Video load error:', err);
+      setLiveVideoError(err.message);
     }
   };
 
@@ -378,77 +371,6 @@ function App() {
       return [];
     }
   }, [liveVideoSrc]);
-
-  // ── Helper: save file permanently on server ──────────────────────────────
-  const saveAssetToServer = async (file: File, type: 'video' | 'obj' | 'mtl'): Promise<string | null> => {
-    try {
-      const reader = new FileReader();
-      const b64 = await new Promise<string>((resolve, reject) => {
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      const resp = await fetch('http://localhost:8765/api/upload-asset', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type, filename: file.name, data: b64 })
-      });
-      const data = await resp.json();
-      if (data.ok) {
-        console.log(`[UPLOAD] ${file.name} guardado permanentemente → ${data.url}`);
-        return data.url; // e.g. "/videos/MyVideo.mp4" or "/recreacion/Model.obj"
-      } else {
-        console.warn(`[UPLOAD] Servidor respondió error: ${data.error}`);
-        return null;
-      }
-    } catch (e) {
-      console.warn('[UPLOAD] No se pudo guardar en servidor, usando blob URL:', e);
-      return null;
-    }
-  };
-
-  // ── Upload a video file for a specific mapping ──
-  const handleMappingVideoUpload = async (mappingId: string, file: File) => {
-    const blobUrl = URL.createObjectURL(file);
-    // Use blob URL immediately for playback, then replace with permanent URL
-    setMappings(prev => prev.map(m =>
-      m.id === mappingId ? { ...m, videoFile: file.name, videoBlobUrl: blobUrl } : m
-    ));
-    const permanentUrl = await saveAssetToServer(file, 'video');
-    if (permanentUrl) {
-      setMappings(prev => prev.map(m =>
-        m.id === mappingId ? { ...m, videoBlobUrl: permanentUrl } : m
-      ));
-    }
-  };
-
-  // ── Upload an .obj file for a specific mapping ──
-  const handleMappingObjUpload = async (mappingId: string, file: File) => {
-    const blobUrl = URL.createObjectURL(file);
-    setMappings(prev => prev.map(m =>
-      m.id === mappingId ? { ...m, objFile: file.name, objBlobUrl: blobUrl } : m
-    ));
-    const permanentUrl = await saveAssetToServer(file, 'obj');
-    if (permanentUrl) {
-      setMappings(prev => prev.map(m =>
-        m.id === mappingId ? { ...m, objBlobUrl: permanentUrl } : m
-      ));
-    }
-  };
-
-  // ── Upload an .mtl file for a specific mapping ──
-  const handleMappingMtlUpload = async (mappingId: string, file: File) => {
-    const blobUrl = URL.createObjectURL(file);
-    setMappings(prev => prev.map(m =>
-      m.id === mappingId ? { ...m, mtlFile: file.name, mtlBlobUrl: blobUrl } : m
-    ));
-    const permanentUrl = await saveAssetToServer(file, 'mtl');
-    if (permanentUrl) {
-      setMappings(prev => prev.map(m =>
-        m.id === mappingId ? { ...m, mtlBlobUrl: permanentUrl } : m
-      ));
-    }
-  };
 
   // ── Check mappings: detected active label → trigger associated video ──
   const mappingLogCountRef = useRef(0);
@@ -700,9 +622,7 @@ function App() {
                   <div className={`status-indicator ${(cameraEnabled || liveVideoSrc) ? 'live' : ''}`} style={{
                     backgroundColor: liveVideoSrc ? 'rgba(31,111,235,0.8)' : cameraEnabled ? 'rgba(0,0,0,0.6)' : 'rgba(255,149,0,0.8)'
                   }}>
-                    {liveVideoLoading ? (
-                      <><span style={{ marginRight: 8, animation: 'pulse 1s infinite' }}>⏳</span> CONVIRTIENDO VÍDEO...</>
-                    ) : liveVideoSrc ? (
+                    {liveVideoSrc ? (
                       <><span className="dot pulse" style={{ backgroundColor: '#1f6feb' }}></span> 🎥 VÍDEO CARGADO</>
                     ) : cameraEnabled ? (
                       <><span className="dot pulse"></span> {t('camLive')}</>
@@ -761,18 +681,7 @@ function App() {
                   </div>
                 </div>
 
-                {/* Loading overlay for video conversion */}
-                {liveVideoLoading && (
-                  <div style={{
-                    position: 'absolute', inset: 0, zIndex: 20, background: 'rgba(0,0,0,0.75)',
-                    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                    borderRadius: 8,
-                  }}>
-                    <div style={{ fontSize: '2.5rem', marginBottom: 16, animation: 'pulse 1.5s infinite' }}>🔄</div>
-                    <div style={{ color: '#fff', fontSize: '1.1rem', fontWeight: 700 }}>Convirtiendo vídeo...</div>
-                    <div style={{ color: '#8b949e', fontSize: '0.8rem', marginTop: 8 }}>El formato se está convirtiendo a MP4 para el navegador</div>
-                  </div>
-                )}
+
 
                 {/* Video error banner */}
                 {liveVideoError && (
@@ -851,7 +760,7 @@ function App() {
           <PlcConfig />
 
         ) : activeTab === 'config' ? (
-          <ConfigScreen mappings={mappings} setMappings={setMappings} onMappingVideoUpload={handleMappingVideoUpload} onMappingObjUpload={handleMappingObjUpload} onMappingMtlUpload={handleMappingMtlUpload} />
+          <ConfigScreen mappings={mappings} setMappings={setMappings} setActivePlaybackUrl={setActivePlaybackUrl} setActivePlaybackLabel={setActivePlaybackLabel} setVideoPopupMinimized={setVideoPopupMinimized} />
         ) : activeTab === 'chat' ? (
           <div className="chat-container">
             <div className="chat-header">
@@ -1058,6 +967,44 @@ function App() {
           to { opacity: 1; }
         }
       `}</style>
+      
+      {/* ── Facial Login Overlay ── */}
+      {appLocked && (
+        <div className="lock-overlay">
+          <div className="lock-modal">
+            <h2>Acceso Biométrico</h2>
+            <p>Por favor, mira a la cámara para desbloquear el sistema</p>
+            
+            <div className="camera-preview-container">
+              <img 
+                src="http://localhost:8765/api/stream?face_mesh=true" 
+                alt="Camera Stream" 
+                style={{width: '100%', height: '100%', objectFit: 'contain', background: '#0d1117'}} 
+              />
+              <div className="scanning-laser"></div>
+            </div>
+
+            <div style={{minHeight: '40px', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%'}}>
+              {lockGreeting ? (
+                <h3 style={{color: '#3fb950', margin: 0, fontSize: '1.4rem', textShadow: '0 0 10px rgba(63,185,80,0.5)'}}>
+                  {lockGreeting}
+                </h3>
+              ) : (
+                <div className={`lock-status ${lockStatus}`} style={{width: '100%', justifyContent: 'center'}}>
+                   {lockStatus === 'verifying' && <span style={{animation: 'pulse 1s infinite'}}>👀</span>}
+                   {lockStatus === 'success' && <span>✅</span>}
+                   {lockStatus === 'error' && <span>❌</span>}
+                   {lockMessage}
+                </div>
+              )}
+            </div>
+
+            <button className="skip-btn" onClick={() => setAppLocked(false)} style={{marginTop: '10px'}}>
+              Omitir / Entrar sin rostro
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

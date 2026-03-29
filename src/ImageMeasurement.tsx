@@ -58,15 +58,27 @@ const ImageMeasurement: React.FC = () => {
         return () => { window.removeEventListener('storage', onStorage); clearInterval(interval); };
     }, []);
 
-    // Track specification (from calibration screen)
-    const [trackSpec, setTrackSpec] = useState<any>(() => {
-        const saved = localStorage.getItem('trackSpec');
-        return saved ? JSON.parse(saved) : null;
+    // Track specifications (from calibration screen) — supports multiple measurements
+    const [trackSpecs, setTrackSpecs] = useState<any[]>(() => {
+        const saved = localStorage.getItem('trackSpecs');
+        if (saved) return JSON.parse(saved);
+        // Backward compat: migrate old single trackSpec
+        const old = localStorage.getItem('trackSpec');
+        if (old) {
+            const arr = [JSON.parse(old)];
+            localStorage.setItem('trackSpecs', JSON.stringify(arr));
+            localStorage.removeItem('trackSpec');
+            return arr;
+        }
+        return [];
     });
     useEffect(() => {
         const onStorage = () => {
-            const saved = localStorage.getItem('trackSpec');
-            setTrackSpec(saved ? JSON.parse(saved) : null);
+            const saved = localStorage.getItem('trackSpecs');
+            if (saved) { setTrackSpecs(JSON.parse(saved)); return; }
+            // Backward compat
+            const old = localStorage.getItem('trackSpec');
+            setTrackSpecs(old ? [JSON.parse(old)] : []);
         };
         window.addEventListener('storage', onStorage);
         const interval = setInterval(onStorage, 2000);
@@ -168,70 +180,18 @@ const ImageMeasurement: React.FC = () => {
         const canvas = canvasRef.current;
         if (canvas) { canvas.width = 1200; canvas.height = 900; }
 
-        // Check if format is browser-compatible
-        const ext = file.name.split('.').pop()?.toLowerCase() || '';
-        const browserFormats = ['mp4', 'webm', 'ogg', 'ogv'];
-
-        if (browserFormats.includes(ext)) {
-            // Direct playback — wrap in try/catch and validate
-            try {
-                const blobUrl = URL.createObjectURL(file);
-                // Test if the browser can actually decode this video
-                const testVideo = document.createElement('video');
-                testVideo.preload = 'metadata';
-                await new Promise<void>((resolve, reject) => {
-                    testVideo.onloadedmetadata = () => resolve();
-                    testVideo.onerror = () => reject(new Error(
-                        `El navegador no puede reproducir este vídeo (${ext}). Puede que el códec no sea compatible.`
-                    ));
-                    // Timeout after 10 seconds
-                    setTimeout(() => reject(new Error('Tiempo agotado al cargar el vídeo.')), 10000);
-                    testVideo.src = blobUrl;
-                });
-                testVideo.src = ''; // cleanup test element
-                setVideoSrc(blobUrl);
-            } catch (err: any) {
-                console.error('Video load error:', err);
-                setMeasurementResult(`Error: ${err.message}`);
-                setSourceType('image');
-            }
-        } else {
-            // AVI, MOV, WMV, MKV etc. → convert via backend
-            setIsProcessing(true);
-            setMeasurementResult(`Convirtiendo vídeo (${ext.toUpperCase()})...`);
-            try {
-                const reader = new FileReader();
-                const b64 = await new Promise<string>((resolve, reject) => {
-                    reader.onload = () => resolve(reader.result as string);
-                    reader.onerror = () => reject(new Error('Error leyendo el archivo de vídeo'));
-                    reader.readAsDataURL(file);
-                });
-
-                const resp = await fetch('http://localhost:8765/api/video/convert', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ video: b64 })
-                });
-
-                if (!resp.ok) {
-                    throw new Error(`Error del servidor: ${resp.status} ${resp.statusText}`);
-                }
-
-                const data = await resp.json();
-                if (!data.ok) throw new Error(data.error || 'Error desconocido en la conversión');
-
-                // Create blob URL from returned MP4
-                const mp4Bytes = Uint8Array.from(atob(data.mp4_base64), c => c.charCodeAt(0));
-                const blob = new Blob([mp4Bytes], { type: 'video/mp4' });
-                setVideoSrc(URL.createObjectURL(blob));
-                setMeasurementResult(null);
-            } catch (err: any) {
-                console.error('Video conversion error:', err);
-                setMeasurementResult(`Error convirtiendo vídeo: ${err.message}`);
-                setSourceType('image');
-            } finally {
-                setIsProcessing(false);
-            }
+        setIsProcessing(true);
+        setMeasurementResult(`Analizando vídeo con Roboflow WebRTC...`);
+        try {
+            const blobUrl = URL.createObjectURL(file);
+            setVideoSrc(blobUrl);
+            setMeasurementResult(`Vídeo cargado localmente. Preparado para reproducir.`);
+        } catch (err: any) {
+            console.error('Video load error:', err);
+            setMeasurementResult(`Error analizando vídeo: ${err.message}`);
+            setSourceType('image');
+        } finally {
+            setIsProcessing(false);
         }
     };
 
@@ -267,24 +227,8 @@ const ImageMeasurement: React.FC = () => {
         };
     }, [sourceType]);
 
-    // ═══ VIDEO RENDER LOOP WITH REAL-TIME ROBOFLOW INFERENCE ═══
+    // ═══ VIDEO RENDER LOOP (PLAYBACK DE VIDEO YA ANALIZADO MASIVAMENTE) ═══
     const startVideoRenderLoop = () => {
-        // Send FIRST frame immediately
-        const video0 = videoElementRef.current;
-        if (video0 && !isInferringRef.current) {
-            isInferringRef.current = true;
-            lastInferenceTimeRef.current = performance.now();
-            setVideoInferenceStatus('inferring');
-            sendFrameToRoboflow(video0).then(preds => {
-                videoDetectionsRef.current = preds;
-                isInferringRef.current = false;
-                setVideoInferenceStatus('done');
-            }).catch(() => {
-                isInferringRef.current = false;
-                setVideoInferenceStatus('idle');
-            });
-        }
-
         const renderFrame = () => {
             const video = videoElementRef.current;
             const canvas = canvasRef.current;
@@ -310,37 +254,35 @@ const ImageMeasurement: React.FC = () => {
             ctx.fillRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(video, offX, offY, vw * scale, vh * scale);
 
-            // Draw current detections overlay
-            const dets = videoDetectionsRef.current;
-            if (dets && dets.length > 0) {
-                drawDetectionsOnCanvas(ctx, dets, vw, vh, scale, offX, offY, confidenceRef.current);
-                // Draw track overlay
-                const ts = localStorage.getItem('trackSpec');
-                if (ts) drawTrackOverlay(ctx, dets, vw, vh, scale, offX, offY, confidenceRef.current, JSON.parse(ts));
+            // Fetch generic Roboflow predictions ~3 FPS
+            const now = Date.now();
+            if (now - lastInferenceTimeRef.current > 300 && !isInferringRef.current) {
+                isInferringRef.current = true;
+                lastInferenceTimeRef.current = now;
+
+                sendFrameToRoboflow(video).then(preds => {
+                    videoDetectionsRef.current = preds;
+                    setDetections(preds);
+                }).catch(err => {
+                    console.error("Frame analysis error:", err);
+                }).finally(() => {
+                    isInferringRef.current = false;
+                });
             }
 
-            // Draw SAM3 person detections overlay (continuous tracking)
+            // Draw Roboflow detections
+            const currentDets = videoDetectionsRef.current;
+            if (currentDets && currentDets.length > 0) {
+                drawDetectionsOnCanvas(ctx, currentDets, vw, vh, scale, offX, offY, 0);
+            }
+
+            // SAM3 person detections overlay (continuous tracking)
             const sam3Dets = sam3DetectionsRef.current;
             if (sam3Dets && sam3Dets.length > 0) {
                 drawDetectionsOnCanvas(ctx, sam3Dets, vw, vh, scale, offX, offY, 0);
             }
 
-            // Send next frame IMMEDIATELY when previous inference is done (no interval!)
-            if (!isInferringRef.current) {
-                isInferringRef.current = true;
-                lastInferenceTimeRef.current = performance.now();
-                setVideoInferenceStatus('inferring');
-                sendFrameToRoboflow(video).then(preds => {
-                    videoDetectionsRef.current = preds;
-                    isInferringRef.current = false;
-                    setVideoInferenceStatus('done');
-                }).catch(() => {
-                    isInferringRef.current = false;
-                    setVideoInferenceStatus('idle');
-                });
-            }
-
-            // SAM3 continuous person tracking — runs in parallel with Roboflow
+            // SAM3 continuous person tracking — runs in parallel
             if (sam3ActiveRef.current && !sam3InferringRef.current) {
                 sam3InferringRef.current = true;
                 sendFrameToSam3(video).then(personDets => {
@@ -710,7 +652,7 @@ const ImageMeasurement: React.FC = () => {
         // ═══ TOLERANCE MATCHING (use DETECTED classes, not calibration-time labels) ═══
         const savedTol = localStorage.getItem('trackTolerances');
         if (savedTol && dxMm > 0) {
-            const tolerances: Array<{ className: string; enabled: boolean; measuredValue: number; tolerancePlus: number; toleranceMinus: number }> = JSON.parse(savedTol);
+            const tolerances: Array<{ className: string; enabled: boolean; compareEnabled?: boolean; measuredValue: number; tolerancePlus: number; toleranceMinus: number }> = JSON.parse(savedTol);
 
             // Find unique class names actually detected in the current image with enabled tolerance
             const detectedClasses = new Set<string>();
@@ -723,8 +665,8 @@ const ImageMeasurement: React.FC = () => {
 
             const results: typeof toleranceResults = [];
             for (const cn of detectedClasses) {
-                // Find tolerance entry matching this detected class (enabled tick = first column)
-                const tolEntry = tolerances.find(t => t.enabled && t.className.trim().toLowerCase() === cn.toLowerCase());
+                // Find tolerance entry matching this detected class (enabled tick = first column, compareEnabled = third column)
+                const tolEntry = tolerances.find(t => t.enabled && t.compareEnabled !== false && t.className.trim().toLowerCase() === cn.toLowerCase());
                 if (tolEntry) {
                     const refValue = tolEntry.measuredValue;
                     const isOk = refValue > 0 && dxMm >= (refValue - tolEntry.toleranceMinus) && dxMm <= (refValue + tolEntry.tolerancePlus);
@@ -1003,11 +945,14 @@ const ImageMeasurement: React.FC = () => {
                 });
 
                 // Draw track overlay on image
-                if (trackSpec && origImg) {
-                    const tScale = Math.min(canvas.width / origImg.width, canvas.height / origImg.height);
-                    const tOffX = (canvas.width / 2) - (origImg.width / 2) * tScale;
-                    const tOffY = (canvas.height / 2) - (origImg.height / 2) * tScale;
-                    drawTrackOverlay(ctx, detections, origImg.width, origImg.height, tScale, tOffX, tOffY, confidenceThreshold, trackSpec);
+                const specs = trackSpecs;
+                if (specs.length > 0 && origImg) {
+                    for (const spec of specs) {
+                        const tScale = Math.min(1200 / origImg.width, 900 / origImg.height);
+                        const tOffX = (1200 - origImg.width * tScale) / 2;
+                        const tOffY = (900 - origImg.height * tScale) / 2;
+                        drawTrackOverlay(ctx, detections, origImg.width, origImg.height, tScale, tOffX, tOffY, confidenceThreshold, spec);
+                    }
                 }
             }
         } else {

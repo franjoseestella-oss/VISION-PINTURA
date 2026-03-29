@@ -283,9 +283,18 @@ export default function BaslerCamera() {
     const [trackPointMode, setTrackPointMode] = useState<'centro' | 'arista'>('centro');
     const [trackPieceA, setTrackPieceA] = useState<TrackPiece | null>(null);
     const [trackPieceB, setTrackPieceB] = useState<TrackPiece | null>(null);
-    const [trackSpec, setTrackSpec] = useState<{ classA: string; classB: string; distanceMm: number; centerA: { x: number; y: number }; centerB: { x: number; y: number } } | null>(() => {
-        const saved = localStorage.getItem('trackSpec');
-        return saved ? JSON.parse(saved) : null;
+    const [trackSpecs, setTrackSpecs] = useState<any[]>(() => {
+        const saved = localStorage.getItem('trackSpecs');
+        if (saved) return JSON.parse(saved);
+        // Backward compat: migrate old single trackSpec
+        const old = localStorage.getItem('trackSpec');
+        if (old) {
+            const arr = [JSON.parse(old)];
+            localStorage.setItem('trackSpecs', JSON.stringify(arr));
+            localStorage.removeItem('trackSpec');
+            return arr;
+        }
+        return [];
     });
 
     // Draggable dimension labels (offsets from default position)
@@ -589,6 +598,55 @@ export default function BaslerCamera() {
             return piece.point;
         };
 
+        // ── Draw ALL saved measurements from trackSpecs (persistent overlays) ──
+        for (let si = 0; si < trackSpecs.length; si++) {
+            const sp = trackSpecs[si] as any;
+            if (!sp.centerA || !sp.centerB) continue;
+            const sA = sp.centerA;
+            const sB = sp.centerB;
+            const sDxPx = Math.abs(sB.x - sA.x);
+            const sDyPx = Math.abs(sB.y - sA.y);
+            const sDistPx = Math.hypot(sDxPx, sDyPx);
+            const sDxMm = (sp.mmPerPx || scaleCalMmPerPx) > 0 ? sDxPx * (sp.mmPerPx || scaleCalMmPerPx) : 0;
+            const sDyMm = (sp.mmPerPx || scaleCalMmPerPx) > 0 ? sDyPx * (sp.mmPerPx || scaleCalMmPerPx) : 0;
+            const sDistMm = (sp.mmPerPx || scaleCalMmPerPx) > 0 ? sDistPx * (sp.mmPerPx || scaleCalMmPerPx) : 0;
+            const slw = Math.max(2, img.naturalWidth / 500);
+            const sfs = Math.max(12, img.naturalWidth / 90);
+
+            // Points A and B
+            const dotR = Math.max(5, img.naturalWidth / 300);
+            ctx.beginPath(); ctx.arc(sA.x, sA.y, dotR, 0, Math.PI * 2);
+            ctx.fillStyle = '#00FFFF80'; ctx.fill(); ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+            ctx.beginPath(); ctx.arc(sB.x, sB.y, dotR, 0, Math.PI * 2);
+            ctx.fillStyle = '#FF00FF80'; ctx.fill(); ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+
+            // Connecting line
+            ctx.beginPath(); ctx.moveTo(sA.x, sA.y); ctx.lineTo(sB.x, sB.y);
+            ctx.strokeStyle = '#FFFF0090'; ctx.lineWidth = slw;
+            ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+
+            // X guide
+            ctx.beginPath(); ctx.moveTo(sA.x, sA.y); ctx.lineTo(sB.x, sA.y);
+            ctx.strokeStyle = '#FF660070'; ctx.lineWidth = slw * 0.7;
+            ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
+
+            // Y guide
+            ctx.beginPath(); ctx.moveTo(sB.x, sA.y); ctx.lineTo(sB.x, sB.y);
+            ctx.strokeStyle = '#00FF6670'; ctx.lineWidth = slw * 0.7;
+            ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
+
+            // Total label
+            const tX = (sA.x + sB.x) / 2;
+            const tY = (sA.y + sB.y) / 2;
+            const tTxt = sDistMm > 0 ? `#${si + 1}: ${sDistMm.toFixed(2)} mm` : `#${si + 1}: ${sDistPx.toFixed(1)} px`;
+            ctx.font = `bold ${sfs}px Inter, sans-serif`; ctx.textAlign = 'center';
+            const sTw = ctx.measureText(tTxt).width;
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillRect(tX - sTw / 2 - 6, tY - sfs / 2 - 4, sTw + 12, sfs + 8);
+            ctx.fillStyle = '#FFFF00CC'; ctx.fillText(tTxt, tX, tY + sfs * 0.35);
+        }
+
+        // ── Draw current A/B selection (active pair being defined) ──
         let trackCenterA: { x: number, y: number } | null = null;
         let trackCenterB: { x: number, y: number } | null = null;
         if (trackPieceA) trackCenterA = drawTrackPiece(trackPieceA, `A: ${trackPieceA.det.class || 'Obj'}`, '#00FFFF');
@@ -665,7 +723,7 @@ export default function BaslerCamera() {
     };
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    useEffect(() => { redrawScaleCalCanvas(); }, [scaleCalImageSrc, scaleCalPoints, measurePoints, measureActive, calZoom, calPan, showLabels, calDetections, calShowDetectionLabels, trackPieceA, trackPieceB, calHiddenDetections, calSelectedDetIdx]);
+    useEffect(() => { redrawScaleCalCanvas(); }, [scaleCalImageSrc, scaleCalPoints, measurePoints, measureActive, calZoom, calPan, showLabels, calDetections, calShowDetectionLabels, trackPieceA, trackPieceB, calHiddenDetections, calSelectedDetIdx, trackSpecs]);
 
     // Analyze calibration image with Roboflow
     const analyzeCalImage = async () => {
@@ -724,6 +782,16 @@ export default function BaslerCamera() {
         const file = e.target.files?.[0];
         if (!file) return;
         setCalZoom(1); setCalPan({ x: 0, y: 0 });
+        
+        // Refrescar el análisis y tracks viejos
+        setCalDetections([]);
+        setCalSelectedDetIdx(null);
+        setTrackPieceA(null);
+        setTrackPieceB(null);
+        setMeasurePoints([]);
+        setTrackSpecs([]);
+        localStorage.removeItem('trackSpecs');
+        
         const reader = new FileReader();
         reader.onload = (ev) => {
             const src = ev.target?.result as string;
@@ -871,13 +939,9 @@ export default function BaslerCamera() {
         }
     };
 
-    // Save track specification
-    const saveTrackSpecification = async () => {
+    // ── Add a single measurement to the in-memory list (no disk I/O) ──
+    const addMeasurement = () => {
         if (!trackPieceA || !trackPieceB) return;
-        const img = scaleCalImageRef.current;
-        if (!img) return;
-
-        // Use the stored points from pieces
         const cA = trackPieceA.point;
         const cB = trackPieceB.point;
         const dxPx = Math.abs(cB.x - cA.x);
@@ -886,28 +950,56 @@ export default function BaslerCamera() {
         const dxMm = scaleCalMmPerPx > 0 ? dxPx * scaleCalMmPerPx : 0;
         const dyMm = scaleCalMmPerPx > 0 ? dyPx * scaleCalMmPerPx : 0;
         const distMm = scaleCalMmPerPx > 0 ? distPx * scaleCalMmPerPx : 0;
-
-        const spec = {
+        const newSpec = {
             classA: trackPieceA.det.class || 'Obj',
             classB: trackPieceB.det.class || 'Obj',
-            distanceMm: distMm,
-            distanceXMm: dxMm,
-            distanceYMm: dyMm,
-            distancePx: distPx,
-            distanceXPx: dxPx,
-            distanceYPx: dyPx,
-            mmPerPx: scaleCalMmPerPx,
-            centerA: cA,
-            centerB: cB,
-            pieceAMode: trackPieceA.mode,
-            pieceAEdge: trackPieceA.edge,
-            pieceBMode: trackPieceB.mode,
-            pieceBEdge: trackPieceB.edge,
+            distanceMm: distMm, distanceXMm: dxMm, distanceYMm: dyMm,
+            distancePx: distPx, distanceXPx: dxPx, distanceYPx: dyPx,
+            mmPerPx: scaleCalMmPerPx, centerA: cA, centerB: cB,
+            pieceAMode: trackPieceA.mode, pieceAEdge: trackPieceA.edge,
+            pieceBMode: trackPieceB.mode, pieceBEdge: trackPieceB.edge,
+            savedAt: new Date().toISOString(),
         };
+        setTrackSpecs(prev => {
+            const next = [...prev, newSpec];
+            localStorage.setItem('trackSpecs', JSON.stringify(next));
+            return next;
+        });
+        log('info', `Medida añadida: ${newSpec.classA} ↔ ${newSpec.classB} = ${distMm.toFixed(2)} mm`);
+    };
 
-        // Save spec in localStorage for TEST screen (will be updated with matchedLabels below)
-        // localStorage.setItem('trackSpec', JSON.stringify(spec)); -- moved below after matchedLabels computed
-        setTrackSpec(spec);
+    // ── Save ALL measurements + image to disk ──
+    const saveTrackSpecification = async () => {
+        // Auto-add the currently selected points if they haven't been added yet
+        let currentArray = trackSpecs;
+        if (trackPieceA && trackPieceB) {
+            const newSpec = {
+                classA: trackPieceA.det.class || 'Obj',
+                classB: trackPieceB.det.class || 'Obj',
+                distanceMm: scaleCalMmPerPx > 0 ? Math.hypot(Math.abs(trackPieceB.point.x - trackPieceA.point.x), Math.abs(trackPieceB.point.y - trackPieceA.point.y)) * scaleCalMmPerPx : 0,
+                distanceXMm: scaleCalMmPerPx > 0 ? Math.abs(trackPieceB.point.x - trackPieceA.point.x) * scaleCalMmPerPx : 0,
+                distanceYMm: scaleCalMmPerPx > 0 ? Math.abs(trackPieceB.point.y - trackPieceA.point.y) * scaleCalMmPerPx : 0,
+                distancePx: Math.hypot(Math.abs(trackPieceB.point.x - trackPieceA.point.x), Math.abs(trackPieceB.point.y - trackPieceA.point.y)),
+                distanceXPx: Math.abs(trackPieceB.point.x - trackPieceA.point.x),
+                distanceYPx: Math.abs(trackPieceB.point.y - trackPieceA.point.y),
+                mmPerPx: scaleCalMmPerPx, centerA: trackPieceA.point, centerB: trackPieceB.point,
+                pieceAMode: trackPieceA.mode, pieceAEdge: trackPieceA.edge,
+                pieceBMode: trackPieceB.mode, pieceBEdge: trackPieceB.edge,
+                savedAt: new Date().toISOString(),
+            };
+            // Check if this exact spec is already the last one, to avoid duplicates
+            const last = currentArray[currentArray.length - 1];
+            if (!last || last.centerA.x !== newSpec.centerA.x || last.centerB.x !== newSpec.centerB.x) {
+                currentArray = [...currentArray, newSpec];
+                setTrackSpecs(currentArray);
+                localStorage.setItem('trackSpecs', JSON.stringify(currentArray));
+                log('info', `Medida actual auto-añadida antes de guardar`);
+            }
+        }
+
+        if (currentArray.length === 0) { alert('No hay medidas para guardar. Selecciona al menos dos puntos o añade una medida.'); return; }
+        const img = scaleCalImageRef.current;
+        if (!img) return;
 
         // Save image and JSON to disk
         const saveDir = 'C:\\Users\\franj\\OneDrive\\Escritorio\\COSAS  FRAN\\PROYECTOS\\PINTURA\\CALIBRACION\\ESPECIFICACION TRACK';
@@ -941,7 +1033,7 @@ export default function BaslerCamera() {
             // Build filename: use matched active labels, fallback to track piece classes
             const fileLabel = matchedLabels.length > 0
                 ? matchedLabels.map(l => l.replace(/[^a-zA-Z0-9_-]/g, '_')).join('_')
-                : `${(spec.classA || 'A').replace(/[^a-zA-Z0-9_-]/g, '_')}_${(spec.classB || 'B').replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+                : currentArray.map((s: any) => `${(s.classA || 'A').replace(/[^a-zA-Z0-9_-]/g, '_')}_${(s.classB || 'B').replace(/[^a-zA-Z0-9_-]/g, '_')}`).join('_');
             const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
             const imgFilename = `track_${fileLabel}_${ts}.png`;
             const specFilename = `track_spec_${fileLabel}.json`;
@@ -954,41 +1046,41 @@ export default function BaslerCamera() {
             });
             const dataImg = await resImg.json();
 
-            // Save JSON spec (include matched tolerance labels)
-            const specWithMatch = {
-                ...spec,
+            // Save JSON spec (all measurements)
+            const allSpecs = currentArray.map((s: any) => ({
+                ...s,
                 matchedToleranceLabels: matchedLabels,
-                matchedDistanceXMm: dxMm,
-                matchedDistanceYMm: dyMm,
-                savedAt: new Date().toISOString(),
-            };
-            // Save full spec with matched labels to localStorage for TEST screen
-            localStorage.setItem('trackSpec', JSON.stringify(specWithMatch));
-            const resSpec = await fetch('http://127.0.0.1:8765/api/save-calibration-image', {
+            }));
+            await fetch('http://127.0.0.1:8765/api/save-calibration-image', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    image: 'data:application/json;base64,' + btoa(JSON.stringify(specWithMatch, null, 2)),
+                    image: 'data:application/json;base64,' + btoa(JSON.stringify(allSpecs, null, 2)),
                     directory: saveDir,
                     mmPerPx: 0,
                     filename: specFilename,
                 }),
             });
-            const dataSpec = await resSpec.json();
 
             if (dataImg.ok) {
                 log('success', `Track guardado: ${dataImg.path}`);
 
-                // Update tolerance measuredValue with X distance for matched active labels
+                // Update tolerance measuredValue with X distance for matched classes
                 if (matchedLabels.length > 0) {
                     const savedTolUpdate = localStorage.getItem('trackTolerances');
                     if (savedTolUpdate) {
                         const tolArr = JSON.parse(savedTolUpdate);
                         let updated = false;
                         for (const tol of tolArr) {
-                            if (matchedLabels.some(ml => ml.toLowerCase() === tol.className.trim().toLowerCase())) {
-                                tol.measuredValue = parseFloat(dxMm.toFixed(2));
+                            if (!matchedLabels.some(ml => ml.toLowerCase() === tol.className.trim().toLowerCase())) continue;
+                            
+                            // Find the measurement touching this class (either A or B)
+                            const matchingSpec = currentArray.find((s: any) => 
+                                s.classA?.toLowerCase() === tol.className.trim().toLowerCase() ||
+                                s.classB?.toLowerCase() === tol.className.trim().toLowerCase()
+                            );
+                            if (matchingSpec) {
+                                tol.measuredValue = parseFloat((matchingSpec.distanceXMm || 0).toFixed(2));
                                 updated = true;
-                                console.log(`[TRACK SAVE] Updated tolerance '${tol.className}' measuredValue = ${dxMm.toFixed(2)} mm (X)`);
                             }
                         }
                         if (updated) {
@@ -997,7 +1089,14 @@ export default function BaslerCamera() {
                     }
                 }
 
-                alert(`✅ Track especificado y guardado.\n${spec.classA} ↔ ${spec.classB}\nX: ${dxMm.toFixed(2)} mm | Y: ${dyMm.toFixed(2)} mm\nTotal: ${distMm.toFixed(2)} mm (${distPx.toFixed(1)} px)\n\nImagen: ${dataImg.path}\nSpec: ${dataSpec.ok ? dataSpec.path : 'error'}`);
+                // Desmarcar pieza actual (limpiar selección) después de guardado exitoso para forzar nuevo inicio de pieza
+                setTrackPieceA(null);
+                setTrackPieceB(null);
+
+                const summary = currentArray.map((s: any, i: number) =>
+                    `  #${i + 1}: ${s.classA} ↔ ${s.classB} = ${s.distanceMm?.toFixed(2)} mm`
+                ).join('\n');
+                alert(`✅ Track guardado con ${currentArray.length} medida(s).\n\n${summary}\n\nImagen: ${dataImg.path}`);
             } else {
                 alert(`❌ Error: ${dataImg.error}`);
             }
@@ -3597,7 +3696,7 @@ undistorted   = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_mtx)`
                                                     background: trackMode ? '#FFFF0018' : '#161b22',
                                                     color: trackMode ? '#FFFF00' : '#8b949e',
                                                 }}
-                                                onClick={() => { setTrackMode(m => !m); setTrackPieceA(null); setTrackPieceB(null); }}
+                                                onClick={() => { setTrackMode(m => !m); if (!trackMode) { setTrackPieceA(null); setTrackPieceB(null); } }}
                                                 disabled={calDetections.length === 0}
                                             >
                                                 🎯 {trackMode ? 'SELECCIONANDO...' : 'DEFINIR TRACK'}
@@ -3648,12 +3747,23 @@ undistorted   = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_mtx)`
                                             </div>
                                         )}
 
-                                        {/* Guardar Track + Mover Cotas */}
+                                        {/* Añadir Medida + Guardar Track + Mover Cotas */}
                                         {trackPieceA && trackPieceB && (
                                             <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
                                                 <button
                                                     className="basler-btn connect"
                                                     style={{ padding: '8px', fontSize: '0.78rem', flex: 1 }}
+                                                    onClick={() => {
+                                                        addMeasurement();
+                                                        setTrackPieceA(null);
+                                                        setTrackPieceB(null);
+                                                    }}
+                                                >
+                                                    ➕ Añadir Medida
+                                                </button>
+                                                <button
+                                                    className="basler-btn connect"
+                                                    style={{ padding: '8px', fontSize: '0.78rem', flex: 1, background: '#238636', borderColor: '#2ea043' }}
                                                     onClick={saveTrackSpecification}
                                                 >
                                                     💾 Guardar Track
@@ -3685,13 +3795,31 @@ undistorted   = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_mtx)`
                                                 )}
                                             </div>
                                         )}
-
-                                        {/* Track spec guardado */}
-                                        {trackSpec && (
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.7rem', background: '#FFFF0010', border: '1px solid #FFFF0030', borderRadius: 4, padding: '4px 8px', marginTop: 2 }}>
-                                                <span style={{ color: '#FFFF00' }}>✓ Track: {trackSpec.classA} ↔ {trackSpec.classB} ({trackSpec.distanceMm.toFixed(2)} mm)</span>
-                                                <button className="basler-tab-mini" style={{ marginLeft: 'auto', fontSize: '0.6rem', borderColor: '#ff444450', color: '#ff4444' }}
-                                                    onClick={() => { setTrackSpec(null); localStorage.removeItem('trackSpec'); }}>Borrar</button>
+                                        {/* Lista de medidas guardadas */}
+                                        {trackSpecs.length > 0 && (
+                                            <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                    <span style={{ fontSize: '0.68rem', fontWeight: 700, color: '#FFFF00', textTransform: 'uppercase', letterSpacing: 0.5 }}>📏 Medidas ({trackSpecs.length})</span>
+                                                    <button className="basler-tab-mini" style={{ fontSize: '0.58rem', borderColor: '#ff444430', color: '#ff4444' }}
+                                                        onClick={() => { if (confirm('¿Borrar TODAS las medidas?')) { setTrackSpecs([]); localStorage.removeItem('trackSpecs'); localStorage.removeItem('trackSpec'); } }}>🗑 Borrar Todo</button>
+                                                </div>
+                                                {trackSpecs.map((ts: any, idx: number) => (
+                                                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.68rem', background: '#FFFF0008', border: '1px solid #FFFF0020', borderRadius: 4, padding: '3px 8px' }}>
+                                                        <span style={{ color: '#484f58', fontWeight: 700, minWidth: 16 }}>#{idx + 1}</span>
+                                                        <span style={{ color: '#00FFFF' }}>{ts.classA}</span>
+                                                        <span style={{ color: '#8b949e' }}>↔</span>
+                                                        <span style={{ color: '#FF00FF' }}>{ts.classB}</span>
+                                                        <span style={{ color: '#FFFF00', fontWeight: 600, marginLeft: 'auto' }}>{ts.distanceMm?.toFixed(2) ?? '?'} mm</span>
+                                                        <button style={{ padding: '1px 5px', fontSize: '0.58rem', background: 'transparent', border: '1px solid #ff444430', borderRadius: 3, color: '#ff4444', cursor: 'pointer' }}
+                                                            onClick={() => {
+                                                                setTrackSpecs(prev => {
+                                                                    const next = prev.filter((_: any, i: number) => i !== idx);
+                                                                    localStorage.setItem('trackSpecs', JSON.stringify(next));
+                                                                    return next;
+                                                                });
+                                                            }}>✕</button>
+                                                    </div>
+                                                ))}
                                             </div>
                                         )}
                                     </div>

@@ -34,6 +34,16 @@ import base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+# ── Reconocimiento facial (opcional) ─────────────────────────────────────────
+try:
+    import face_service as _face_svc
+    FACE_SERVICE_AVAILABLE = True
+    print("[INFO] face_service cargado correctamente")
+except Exception as _fe:
+    FACE_SERVICE_AVAILABLE = False
+    _face_svc = None
+    print(f"[WARN] face_service no disponible: {_fe}")
+
 # ── Intentar importar pypylon ────────────────────────────────────────────────
 try:
     from pypylon import pylon
@@ -124,6 +134,22 @@ def apply_calibration(frame):
     return mapped
 
 load_calibration()
+
+# ── Proveer frame actual a face_service ──────────────────────────────────────
+if FACE_SERVICE_AVAILABLE:
+    def _face_frame_provider():
+        with frame_lock:
+            f = current_frame
+            st = camera_state["status"]
+
+        if f is None and st != "connected":
+            print("[INFO] Auto-conectando cámara solicitada por face_service...")
+            connect_camera({})
+            
+        return f.copy() if f is not None else None
+    
+    _face_svc.set_frame_provider(_face_frame_provider)
+    print("[INFO] face_service: frame provider configurado")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -960,9 +986,17 @@ def connect_camera(params: dict) -> dict:
 
         except Exception as e:
             err_msg = str(e)
-            print(f"[ERROR] connect_camera: {err_msg}")
-            camera_state.update({"status": "error", "error": err_msg})
-            return {"ok": False, "error": err_msg}
+            print(f"[ERROR] connect_camera pypylon falló: {err_msg}. Intentando usar cámara web local...")
+            camera_state.update({
+                "status": "connected",
+                "model": "WebCam Local (Fallback)",
+                "serial": "Webcam-0001",
+                "ip": "localhost",
+                "firmware": "OpenCV",
+                "error": "",
+            })
+            threading.Thread(target=_simulate_frames, args=(params,), daemon=True).start()
+            return {"ok": True, "simulated": True, "fallback": True}
 
 
 def _disconnect_camera_internal():
@@ -1023,68 +1057,55 @@ def _grab_frames(cam):
 
 
 def _simulate_frames(params):
-    """Hilo de simulación de frames cuando pypylon no está disponible."""
-    global current_frame
-    import math
-    W = min(int(params.get("width", 640)), 640)
-    H = min(int(params.get("height", 400)), 400)
-    t = 0
-    fps_target = float(params.get("acquisitionFrameRateAbs", 10.0))
+    """Hilo de simulación: Usa la WebCam real en vez del hardware industrial si pypylon no conecta."""
+    global current_frame, camera_state
+    
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("[ERROR] No se pudo abrir la cámara web (índice 0)")
+        return
+        
+    # Intentar configurar resolución
+    W = int(params.get("width", 640))
+    H = int(params.get("height", 480))
+    # Para la webcam web normal es mejor 1280x720 o 640x480
+    
+    fps_target = float(params.get("acquisitionFrameRateAbs", 30.0))
     delay = 1.0 / max(fps_target, 1.0)
-    exposure = float(params.get("exposureTimeAbs", 10000))
-    gain = int(params.get("gainRaw", 0))
 
     fps_counter = 0
     fps_timer = time.time()
 
-    while camera_state["status"] == "connected":
-        frame = np.zeros((H, W, 3), dtype=np.uint8)
-        # Patrón radial monocromo
-        cy, cx = H // 2, W // 2
-        for y in range(0, H, 2):
-            for x in range(0, W, 2):
-                dist = math.hypot(x - cx, y - cy)
-                radial = max(0, 1 - dist / (min(W, H) * 0.44))
-                wave = math.sin((x + t) * 0.022) * 20 + math.cos((y + t * 0.7) * 0.022) * 14
-                noise = (np.random.random() - 0.5) * 12
-                exp_f = min(1.0, exposure / 50000.0)
-                v = int(20 + exp_f * 160 * radial + wave + noise + gain * 0.3)
-                v = max(0, min(255, v))
-                frame[y, x] = [v, v, v]
-                if y+1 < H: frame[y+1, x] = [v, v, v]
-                if x+1 < W: frame[y, x+1] = [v, v, v]
-                if y+1 < H and x+1 < W: frame[y+1, x+1] = [v, v, v]
+    print("[INFO] WebCam (cv2.VideoCapture) en ejecución como cámara principal.")
 
-        # Overlay de texto
-        cv2.putText(frame, f"SIMULADO - SN:40002788", (10, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 100), 1)
-        cv2.putText(frame, f"IP:192.168.0.201  {W}x{H}", (10, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
-        cv2.putText(frame, f"Exp:{int(exposure)}us Gain:{gain}", (10, 56),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
-        # Crosshair
-        cv2.line(frame, (cx, 0), (cx, H), (0, 200, 80), 1)
-        cv2.line(frame, (0, cy), (W, cy), (0, 200, 80), 1)
+    while camera_state["status"] == "connected":
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(delay)
+            continue
 
         frame_corrected = apply_calibration(frame)
         with frame_lock:
             current_frame = frame_corrected
             camera_state["frame_count"] += 1
-        t += 0.35
+            
         fps_counter += 1
         now = time.time()
         if now - fps_timer >= 1.0:
             camera_state["fps"] = round(fps_counter / (now - fps_timer), 1)
             fps_counter = 0
             fps_timer = now
+            
         time.sleep(delay)
+
+    cap.release()
 
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Generador MJPEG
 # ════════════════════════════════════════════════════════════════════════════
 
-def get_jpeg_frame(quality=80):
+def get_jpeg_frame(quality=80, draw_face_mesh=False):
     """Retorna el frame actual como JPEG bytes.
     Si la eliminación de personas está activa, usa el frame procesado."""
     # Si eliminación de personas está activa, usar el frame procesado
@@ -1108,6 +1129,11 @@ def get_jpeg_frame(quality=80):
         frame = np.zeros((400, 640, 3), dtype=np.uint8)
         cv2.putText(frame, "Sin señal — conecta la cámara", (80, 200),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (60, 60, 60), 2)
+    else:
+        # Dibujar malla facial si se solicita y el servicio está disponible
+        if draw_face_mesh and FACE_SERVICE_AVAILABLE and hasattr(_face_svc, "draw_face_mesh_on_frame"):
+            frame = _face_svc.draw_face_mesh_on_frame(frame)
+
     try:
         ret, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
         if ret:
@@ -1130,7 +1156,8 @@ class CameraHandler(BaseHTTPRequestHandler):
     def send_cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Range")
+        self.send_header("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges")
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -1144,6 +1171,111 @@ class CameraHandler(BaseHTTPRequestHandler):
         # ── /api/status
         if path == "/api/status":
             self._json_response(camera_state)
+
+        # ── /api/select-file
+        elif path == "/api/select-file":
+            query = parse_qs(parsed.query)
+            file_type = query.get("type", ["video"])[0]
+            
+            def open_dialog():
+                import tkinter as tk
+                from tkinter import filedialog
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes('-topmost', True)
+                
+                title = "Seleccionar Archivo"
+                filetypes = [("Todos los archivos", "*.*")]
+                if file_type == "video":
+                    title = "Selecciona el vídeo"
+                    filetypes = [("Archivos de video", "*.mp4 *.avi *.mkv *.mov"), ("Todos", "*.*")]
+                elif file_type == "obj":
+                    title = "Selecciona el modelo 3D"
+                    filetypes = [("Archivos OBJ", "*.obj"), ("Todos", "*.*")]
+                elif file_type == "mtl":
+                    title = "Selecciona el material"
+                    filetypes = [("Archivos MTL", "*.mtl"), ("Todos", "*.*")]
+                    
+                selected = filedialog.askopenfilename(parent=root, title=title, filetypes=filetypes)
+                root.destroy()
+                return selected
+
+            try:
+                selected_path = open_dialog()
+                if selected_path:
+                    # Convierte '/' a '\\' para Windows format visual, pero ambos funcionan
+                    import os
+                    selected_path = os.path.normpath(selected_path)
+                    
+                self._json_response({"ok": True, "path": selected_path})
+            except Exception as e:
+                self._json_response({"ok": False, "error": str(e)})
+
+        # ── /api/local-file
+        elif path == "/api/local-file":
+            try:
+                import urllib.parse
+                import os
+                import re
+                query = urllib.parse.parse_qs(parsed.query)
+                file_path = query.get("path", [""])[0].strip('"').strip("'")
+                
+                if not os.path.exists(file_path) or not os.path.isfile(file_path):
+                    self.send_response(404)
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+
+                size = os.path.getsize(file_path)
+                ext = file_path.lower().split('.')[-1]
+                ctype = "application/octet-stream"
+                if ext in ["mp4", "webm", "ogg"]: ctype = f"video/{ext}"
+                elif ext in ["obj", "mtl"]: ctype = "text/plain"
+
+                range_header = self.headers.get("Range")
+                start, end = 0, size - 1
+                length = size
+                if range_header:
+                    match = re.search(r"bytes=(\d+)-(\d*)", range_header)
+                    if match:
+                        start = int(match.group(1))
+                        end = int(match.group(2)) if match.group(2) else size - 1
+                        length = end - start + 1
+                        self.send_response(206)
+                        self.send_header("Content-Type", ctype)
+                        self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                    else:
+                        self.send_response(200)
+                        self.send_header("Content-Type", ctype)
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Type", ctype)
+
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Range")
+                self.send_header("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", str(length))
+                self.end_headers()
+
+                with open(file_path, "rb") as f:
+                    f.seek(start)
+                    rem = length
+                    while rem > 0:
+                        chunk = f.read(min(rem, 65536))
+                        if not chunk: break
+                        self.wfile.write(chunk)
+                        rem -= len(chunk)
+            except Exception as e:
+                try:
+                    self.send_response(500)
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(str(e).encode('utf-8'))
+                except:
+                    pass
 
         # ── /api/devices
 
@@ -1165,9 +1297,14 @@ class CameraHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
             self.send_cors()
             self.end_headers()
+            
+            # Parametro para dibujar mallazo facial
+            query = parse_qs(parsed.query)
+            draw_face_mesh = query.get("face_mesh", ["false"])[0].lower() == "true"
+            
             try:
                 while True:
-                    jpg = get_jpeg_frame(quality=75)
+                    jpg = get_jpeg_frame(quality=75, draw_face_mesh=draw_face_mesh)
                     if jpg:
                         header = (
                             b"--frame\r\n"
@@ -1378,6 +1515,46 @@ class CameraHandler(BaseHTTPRequestHandler):
             with person_removal_lock:
                 state_copy = dict(person_removal_state)
             self._json_response(state_copy)
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  RECONOCIMIENTO FACIAL — endpoints GET
+        # ══════════════════════════════════════════════════════════════════════
+
+        # ── /api/face/status — estado disponibilidad del módulo
+        elif path == "/api/face/status":
+            self._json_response({
+                "ok": True,
+                "face_service": FACE_SERVICE_AVAILABLE,
+                "mediapipe": getattr(_face_svc, 'MEDIAPIPE_AVAILABLE', False) if FACE_SERVICE_AVAILABLE else False,
+                "face_recognition": getattr(_face_svc, 'FACE_RECOGNITION_AVAILABLE', False) if FACE_SERVICE_AVAILABLE else False,
+            })
+
+        # ── /api/face/users — lista de usuarios registrados
+        elif path == "/api/face/users":
+            if not FACE_SERVICE_AVAILABLE:
+                self._json_response({"ok": False, "error": "face_service no disponible"})
+                return
+            self._json_response({"ok": True, "users": _face_svc.list_users()})
+
+        # ── /api/face/registration/status — estado del proceso de registro activo
+        elif path == "/api/face/registration/status":
+            if not FACE_SERVICE_AVAILABLE:
+                self._json_response({"ok": False, "error": "face_service no disponible"})
+                return
+            self._json_response({"ok": True, "state": _face_svc.get_registration_status()})
+
+        # ── /api/face/user-image?username=xxx — imagen facial de un usuario
+        elif path == "/api/face/user-image":
+            if not FACE_SERVICE_AVAILABLE:
+                self._json_response({"ok": False, "error": "face_service no disponible"})
+                return
+            query    = parse_qs(parsed.query)
+            username = query.get("username", [""])[0]
+            b64      = _face_svc.get_user_face_b64(username)
+            if b64:
+                self._json_response({"ok": True, "image": b64})
+            else:
+                self._json_response({"ok": False, "error": "Imagen no encontrada"})
 
         else:
             self.send_response(404)
@@ -1941,6 +2118,111 @@ class CameraHandler(BaseHTTPRequestHandler):
                 print(traceback.format_exc())
                 self._json_response({"ok": False, "error": str(e)})
 
+        # ── /api/video/analyze — Analyze video with Roboflow WebRTC
+        elif path == "/api/video/analyze":
+            import tempfile, traceback
+            try:
+                b64_str = params.get("video", "")
+                if "," in b64_str:
+                    b64_str = b64_str.split(",", 1)[1]
+
+                video_data = base64.b64decode(b64_str)
+                if len(video_data) < 100:
+                    raise ValueError("Archivo de vídeo demasiado pequeño o vacío")
+
+                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_in:
+                    tmp_in.write(video_data)
+                    input_path = tmp_in.name
+
+                output_path = input_path + "_out.mp4"
+
+                from inference_sdk import InferenceHTTPClient
+                from inference_sdk.webrtc import VideoFileSource, StreamConfig, VideoMetadata
+
+                client = InferenceHTTPClient.init(
+                    api_url="https://serverless.roboflow.com",
+                    api_key="K6YHioHqtuwbsNmR2n7O"
+                )
+
+                source = VideoFileSource(input_path, realtime_processing=False)
+
+                VIDEO_OUTPUT = "output_image"
+                
+                config = StreamConfig(
+                    stream_output=[],
+                    data_output=["output_image","count_objects","predictions"],
+                    requested_plan="webrtc-gpu-medium",
+                    requested_region="us",
+                )
+
+                session = client.webrtc.stream(
+                    source=source,
+                    workflow="detect-count-and-visualize-2",
+                    workspace="welding-hqci3",
+                    image_input="image",
+                    config=config
+                )
+
+                frames = []
+
+                @session.on_data()
+                def on_data(data: dict, metadata: VideoMetadata):
+                    if VIDEO_OUTPUT and VIDEO_OUTPUT in data:
+                        timestamp_ms = metadata.pts * metadata.time_base * 1000
+                        img = cv2.imdecode(np.frombuffer(base64.b64decode(data[VIDEO_OUTPUT]["value"]), np.uint8), cv2.IMREAD_COLOR)
+                        frames.append((timestamp_ms, metadata.frame_id, img))
+                        if metadata.frame_id % 10 == 0:
+                            print(f"[Video WebRTC] Processed frame {metadata.frame_id}")
+
+                print(f"[Video WebRTC] Empezando stream de vídeo...")
+                session.run()
+
+                if len(frames) > 0:
+                    frames.sort(key=lambda x: x[1])
+                    if len(frames) > 1:
+                        dur = (frames[-1][0] - frames[0][0]) / 1000.0
+                        fps = (len(frames) - 1) / dur if dur > 0 else 30.0
+                    else:
+                        fps = 30.0
+                        
+                    h, w = frames[0][2].shape[:2]
+                    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                    writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+                    if not writer.isOpened():
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+                    
+                    for _, _, frame in frames:
+                        writer.write(frame)
+                    writer.release()
+                    print(f"[Video WebRTC] Hecho! {len(frames)} frames at {fps:.1f} FPS -> {output_path}")
+                else:
+                    raise RuntimeError("No video frames collected from Roboflow WebRTC.")
+
+                # Read converted MP4 and return as base64
+                with open(output_path, "rb") as f:
+                    mp4_bytes = f.read()
+
+                mp4_b64 = base64.b64encode(mp4_bytes).decode("ascii")
+
+                os.remove(input_path)
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+
+                self._json_response({
+                    "ok": True,
+                    "mp4_base64": mp4_b64,
+                    "frames": len(frames),
+                    "fps": fps,
+                    "width": w,
+                    "height": h,
+                })
+
+            except Exception as e:
+                print(f"[Video Convert ERROR] {e}")
+                print(traceback.format_exc())
+                self._json_response({"ok": False, "error": str(e)})
+
         # ── /api/upload-asset — save video/3D model permanently to disk
         elif path == "/api/upload-asset":
             try:
@@ -2441,6 +2723,51 @@ class CameraHandler(BaseHTTPRequestHandler):
                 self._json_response(result)
             else:
                 self._json_response({"ok": False, "error": f"Acción no válida: {action}"})
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  RECONOCIMIENTO FACIAL — endpoints POST
+        # ══════════════════════════════════════════════════════════════════════
+
+        # ── /api/face/registration/start — iniciar registro biométrico
+        elif path == "/api/face/registration/start":
+            if not FACE_SERVICE_AVAILABLE:
+                self._json_response({"ok": False, "error": "face_service no disponible. pip install mediapipe face_recognition"})
+                return
+            username = params.get("username", "").strip()
+            fullname = params.get("fullname", "").strip() or username
+            if not username:
+                self._json_response({"ok": False, "error": "Falta el campo 'username'"})
+                return
+            result = _face_svc.start_registration(username, fullname)
+            self._json_response(result)
+
+        # ── /api/face/registration/stop — cancelar registro
+        elif path == "/api/face/registration/stop":
+            if not FACE_SERVICE_AVAILABLE:
+                self._json_response({"ok": False, "error": "face_service no disponible"})
+                return
+            result = _face_svc.stop_registration()
+            self._json_response(result)
+
+        # ── /api/face/user/delete — eliminar usuario
+        elif path == "/api/face/user/delete":
+            if not FACE_SERVICE_AVAILABLE:
+                self._json_response({"ok": False, "error": "face_service no disponible"})
+                return
+            username = params.get("username", "").strip()
+            if not username:
+                self._json_response({"ok": False, "error": "Falta el campo 'username'"})
+                return
+            result = _face_svc.delete_user(username)
+            self._json_response(result)
+
+        # ── /api/face/verify — reconocer rostro en frame actual
+        elif path == "/api/face/verify":
+            if not FACE_SERVICE_AVAILABLE:
+                self._json_response({"ok": False, "error": "face_service no disponible"})
+                return
+            result = _face_svc.verify_face_from_frame()
+            self._json_response(result)
 
         else:
             self.send_response(404)

@@ -31,6 +31,7 @@ interface TrackTolerance {
     className: string;
     enabled: boolean;
     visible: boolean;
+    compareEnabled?: boolean;
     measuredValue: number;
     tolerancePlus: number;
     toleranceMinus: number;
@@ -39,17 +40,45 @@ interface TrackTolerance {
 interface ConfigScreenProps {
     mappings: VideoMapping[];
     setMappings: React.Dispatch<React.SetStateAction<VideoMapping[]>>;
-    onMappingVideoUpload?: (mappingId: string, file: File) => void;
-    onMappingObjUpload?: (mappingId: string, file: File) => void;
-    onMappingMtlUpload?: (mappingId: string, file: File) => void;
+    setActivePlaybackUrl: React.Dispatch<React.SetStateAction<string | null>>;
+    setActivePlaybackLabel: React.Dispatch<React.SetStateAction<string>>;
+    setVideoPopupMinimized: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 // ─── Sub-tab type ───────────────────────────────────────────────
-type ConfigTab = 'videoMapping' | 'tolerancias' | 'barcode';
+type ConfigTab = 'videoMapping' | 'tolerancias' | 'barcode' | 'registro';
 
-const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMappingVideoUpload, onMappingObjUpload, onMappingMtlUpload }) => {
+// ─── UserAvatar mini-component ──────────────────────────────────
+const UserAvatar: React.FC<{ username: string }> = ({ username }) => {
+    const colors = ['#1f6feb','#238636','#9e6a03','#8b5cf6','#e85d04','#0e8a6e'];
+    const color  = colors[username.charCodeAt(0) % colors.length];
+    return (
+        <div style={{
+            width: 34, height: 34, borderRadius: '50%', flexShrink: 0,
+            background: color, display: 'flex', alignItems: 'center',
+            justifyContent: 'center', fontWeight: 700, fontSize: '0.85rem',
+            color: '#fff', textTransform: 'uppercase', userSelect: 'none',
+        }}>
+            {username[0]}
+        </div>
+    );
+};
+
+const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, setActivePlaybackUrl, setActivePlaybackLabel, setVideoPopupMinimized }) => {
     const [configTab, setConfigTab] = useState<ConfigTab>('tolerancias');
     const [viewingObj, setViewingObj] = useState<{ url: string; fileName: string; mtlUrl?: string; mappingId: string } | null>(null);
+
+    // ═══ FACIAL REGISTRATION STATE ═══
+    const [faceStatus, setFaceStatus]             = useState<{ face_service: boolean; mediapipe: boolean; face_recognition: boolean } | null>(null);
+    const [faceUsers, setFaceUsers]               = useState<any[]>([]);
+    const [regUsername, setRegUsername]           = useState('');
+    const [regFullname, setRegFullname]           = useState('');
+    const [regActive, setRegActive]               = useState(false);
+    const [regState, setRegState]                 = useState<any>(null);
+    const [regError, setRegError]                 = useState('');
+    const [faceVerifyResult, setFaceVerifyResult] = useState<any>(null);
+    const [faceVerifying, setFaceVerifying]       = useState(false);
+    const regPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     // ═══ BARCODE READER STATE ═══
     const [barcodeListening, setBarcodeListening] = useState(false);
@@ -182,14 +211,15 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
         } catch (err: any) {
             setClassesError(err.message);
             // Fallback: extract classes from existing detections in localStorage
-            const saved = localStorage.getItem('trackSpec');
-            if (saved) {
-                const spec = JSON.parse(saved);
-                const classes = new Set<string>();
+            const classes = new Set<string>();
+            const savedSpecs = localStorage.getItem('trackSpecs');
+            const savedSingle = localStorage.getItem('trackSpec');
+            const specs: any[] = savedSpecs ? JSON.parse(savedSpecs) : savedSingle ? [JSON.parse(savedSingle)] : [];
+            for (const spec of specs) {
                 if (spec.classA) classes.add(spec.classA);
                 if (spec.classB) classes.add(spec.classB);
-                setRoboflowClasses(Array.from(classes));
             }
+            if (classes.size > 0) setRoboflowClasses(Array.from(classes));
         } finally {
             setLoadingClasses(false);
         }
@@ -233,6 +263,20 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                 </button>
                 <button style={tabStyle(configTab === 'barcode')} onClick={() => setConfigTab('barcode')}>
                     📊 Lector Código de Barras
+                </button>
+                <button style={tabStyle(configTab === 'registro')} onClick={() => {
+                    setConfigTab('registro');
+                    // Cargar estado del módulo y usuarios al entrar
+                    fetch('http://localhost:8765/api/face/status')
+                        .then(r => r.json())
+                        .then(d => { if (d.ok) setFaceStatus(d); })
+                        .catch(() => {});
+                    fetch('http://localhost:8765/api/face/users')
+                        .then(r => r.json())
+                        .then(d => { if (d.ok) setFaceUsers(d.users || []); })
+                        .catch(() => {});
+                }}>
+                    👤 Registro Facial
                 </button>
             </div>
 
@@ -435,85 +479,78 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                             {/* Video file field with file picker */}
                                             <div>
                                                 <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
-                                                    Archivo de Vídeo
+                                                    Archivo de Vídeo (Ruta Completa)
                                                 </label>
                                                 <div style={{ display: 'flex', gap: 6 }}>
                                                     <input
                                                         type="text"
-                                                        type="text" value={map.videoFile}
-                                                        placeholder="Selecciona un vídeo..."
-                                                        readOnly
+                                                        value={map.videoFile || ""}
+                                                        onChange={(e) => {
+                                                            const val = e.target.value;
+                                                            const url = val ? `http://localhost:8765/api/local-file?path=${encodeURIComponent(val)}` : "";
+                                                            setMappings(mappings.map(m => m.id === map.id ? { ...m, videoFile: val, videoBlobUrl: url } : m));
+                                                        }}
+                                                        placeholder="C:\Ruta\Al\Video.mp4"
                                                         style={{
                                                             flex: 1, padding: '8px 12px', background: '#0d1117',
                                                             border: `1px solid ${map.videoBlobUrl ? '#238636' : hasVideo ? '#23863640' : '#30363d'}`, borderRadius: 6,
                                                             color: map.videoBlobUrl ? '#3fb950' : hasVideo ? '#3fb950' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
-                                                            cursor: 'default',
                                                         }}
                                                     />
-                                                    <label style={{
-                                                        padding: '8px 14px', background: 'linear-gradient(135deg, #1f6feb, #388bfd)', color: '#fff', borderRadius: 6,
-                                                        cursor: 'pointer', fontWeight: 600, fontSize: '0.78rem', display: 'flex',
-                                                        alignItems: 'center', gap: 4, whiteSpace: 'nowrap', flexShrink: 0,
-                                                    }}>
-                                                        📁 Subir
-                                                        <input
-                                                            type="file" accept="video/*,.avi,.mov,.wmv,.mkv,.flv"
-                                                            style={{ display: 'none' }}
-                                                            onChange={(e) => {
-                                                                const file = e.target.files?.[0];
-                                                                if (file && onMappingVideoUpload) {
-                                                                    onMappingVideoUpload(map.id, file);
-                                                                }
-                                                            }}
-                                                        />
-                                                    </label>
                                                 </div>
+                                                {/* Video loaded indicator */}
+                                                {map.videoBlobUrl && (
+                                                    <div style={{
+                                                        marginTop: 6, padding: '6px 10px', background: '#23863615', border: '1px solid #23863640',
+                                                        borderRadius: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+                                                    }}>
+                                                        <span style={{ color: '#3fb950', fontSize: '0.72rem', fontWeight: 700 }}>✓ Vídeo configurado</span>
+                                                        <span style={{ fontSize: '0.68rem', color: '#8b949e', wordBreak: 'break-all' }}>{map.videoFile}</span>
+                                                        <button
+                                                            onClick={() => { setActivePlaybackUrl(map.videoBlobUrl!); setActivePlaybackLabel(map.label || `Map ${map.id}`); setVideoPopupMinimized(false); }}
+                                                            style={{
+                                                                marginLeft: 'auto', padding: '4px 14px', background: '#238636', color: '#fff', border: 'none', borderRadius: 6,
+                                                                fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, boxShadow: '0 2px 5px rgba(0,0,0,0.2)',
+                                                            }}>
+                                                            ▶️ Reproducir original
+                                                        </button>
+                                                    </div>
+                                                )}
                                             </div>
 
-                                            {/* OBJ 3D Model file field */}
-                                            <div>
-                                                <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
-                                                    🧊 Modelo 3D (.obj)
-                                                </label>
-                                                <div style={{ display: 'flex', gap: 6 }}>
-                                                    <input
-                                                        type="text"
-                                                        type="text" value={map.objFile || ''}
-                                                        placeholder="Selecciona un archivo .obj..."
-                                                        readOnly
-                                                        style={{
-                                                            flex: 1, padding: '8px 12px', background: '#0d1117',
-                                                            border: `1px solid ${map.objBlobUrl ? '#1f6feb' : hasObj ? '#1f6feb40' : '#30363d'}`, borderRadius: 6,
-                                                            color: map.objBlobUrl ? '#58a6ff' : hasObj ? '#58a6ff' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
-                                                            cursor: 'default',
-                                                        }}
-                                                    />
-                                                    <label style={{
-                                                        padding: '8px 14px', background: 'linear-gradient(135deg, #8957e5, #a371f7)', color: '#fff', borderRadius: 6,
-                                                        cursor: 'pointer', fontWeight: 600, fontSize: '0.78rem', display: 'flex',
-                                                        alignItems: 'center', gap: 4, whiteSpace: 'nowrap', flexShrink: 0,
-                                                    }}>
-                                                        📁 Subir .obj
+                                            {/* 3D Model file field */}
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                                                <div>
+                                                    <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
+                                                        Modelo 3D (.obj) (Ruta Completa)
+                                                    </label>
+                                                    <div style={{ display: 'flex', gap: 6 }}>
                                                         <input
-                                                            type="file" accept=".obj,.OBJ"
-                                                            style={{ display: 'none' }}
+                                                            type="text"
+                                                            value={map.objFile || ""}
                                                             onChange={(e) => {
-                                                                const file = e.target.files?.[0];
-                                                                if (file && onMappingObjUpload) {
-                                                                    onMappingObjUpload(map.id, file);
-                                                                }
+                                                                const val = e.target.value;
+                                                                const url = val ? `http://localhost:8765/api/local-file?path=${encodeURIComponent(val)}` : "";
+                                                                setMappings(mappings.map(m => m.id === map.id ? { ...m, objFile: val, objBlobUrl: url } : m));
+                                                            }}
+                                                            placeholder="C:\Ruta\Al\Modelo.obj"
+                                                            style={{
+                                                                flex: 1, padding: '8px 12px', background: '#0d1117',
+                                                                border: `1px solid ${map.objBlobUrl ? '#1f6feb' : hasObj ? '#1f6feb40' : '#30363d'}`, borderRadius: 6,
+                                                                color: map.objBlobUrl ? '#58a6ff' : hasObj ? '#58a6ff' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
                                                             }}
                                                         />
-                                                    </label>
+                                                    </div>
                                                 </div>
+
                                                 {/* OBJ loaded indicator */}
                                                 {map.objBlobUrl && (
                                                     <div style={{
                                                         marginTop: 6, padding: '6px 10px', background: '#1f6feb15', border: '1px solid #1f6feb40',
                                                         borderRadius: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
                                                     }}>
-                                                        <span style={{ color: '#58a6ff', fontSize: '0.72rem', fontWeight: 700 }}>✓ Modelo .obj cargado</span>
-                                                        <span style={{ fontSize: '0.68rem', color: '#8b949e' }}>{map.objFile}</span>
+                                                        <span style={{ color: '#58a6ff', fontSize: '0.72rem', fontWeight: 700 }}>✓ Modelo .obj configurado</span>
+                                                        <span style={{ fontSize: '0.68rem', color: '#8b949e', wordBreak: 'break-all' }}>{map.objFile}</span>
                                                         {map.mtlBlobUrl && (
                                                             <span style={{ fontSize: '0.68rem', color: '#3fb950', fontWeight: 600 }}>✓ .mtl</span>
                                                         )}
@@ -526,58 +563,36 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                                 color: '#fff',
                                                                 border: 'none',
                                                                 borderRadius: 6,
-                                                                cursor: 'pointer',
-                                                                fontWeight: 700,
                                                                 fontSize: '0.72rem',
-                                                                display: 'flex',
-                                                                alignItems: 'center',
-                                                                gap: 4,
-                                                                transition: 'all 0.2s',
-                                                                boxShadow: '0 2px 8px rgba(137,87,229,0.3)',
-                                                            }}
-                                                            onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
-                                                            onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
-                                                        >
-                                                            👁 VER
+                                                                fontWeight: 600,
+                                                                cursor: 'pointer',
+                                                                boxShadow: '0 2px 5px rgba(0,0,0,0.2)'
+                                                            }}>
+                                                            👁️ Ver 3D Mapeo
                                                         </button>
                                                     </div>
                                                 )}
 
-                                                {/* MTL Material file field */}
-                                                <div style={{ marginTop: 6 }}>
+                                                <div>
                                                     <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
-                                                        🎨 Material (.mtl) — opcional
+                                                        Material asociado (.mtl opcional) (Ruta Completa)
                                                     </label>
                                                     <div style={{ display: 'flex', gap: 6 }}>
                                                         <input
                                                             type="text"
-                                                            type="text" value={map.mtlFile || ''}
-                                                            placeholder="Selecciona un archivo .mtl..."
-                                                            readOnly
+                                                            value={map.mtlFile || ""}
+                                                            onChange={(e) => {
+                                                                const val = e.target.value;
+                                                                const url = val ? `http://localhost:8765/api/local-file?path=${encodeURIComponent(val)}` : "";
+                                                                setMappings(mappings.map(m => m.id === map.id ? { ...m, mtlFile: val, mtlBlobUrl: url } : m));
+                                                            }}
+                                                            placeholder="C:\Ruta\Al\Material.mtl"
                                                             style={{
                                                                 flex: 1, padding: '8px 12px', background: '#0d1117',
                                                                 border: `1px solid ${map.mtlBlobUrl ? '#238636' : '#30363d'}`, borderRadius: 6,
                                                                 color: map.mtlBlobUrl ? '#3fb950' : '#e6edf3', fontSize: '0.82rem', boxSizing: 'border-box',
-                                                                cursor: 'default',
                                                             }}
                                                         />
-                                                        <label style={{
-                                                            padding: '8px 14px', background: 'linear-gradient(135deg, #238636, #2ea043)', color: '#fff', borderRadius: 6,
-                                                            cursor: 'pointer', fontWeight: 600, fontSize: '0.78rem', display: 'flex',
-                                                            alignItems: 'center', gap: 4, whiteSpace: 'nowrap', flexShrink: 0,
-                                                        }}>
-                                                            📁 Subir .mtl
-                                                            <input
-                                                                type="file" accept=".mtl,.MTL"
-                                                                style={{ display: 'none' }}
-                                                                onChange={(e) => {
-                                                                    const file = e.target.files?.[0];
-                                                                    if (file && onMappingMtlUpload) {
-                                                                        onMappingMtlUpload(map.id, file);
-                                                                    }
-                                                                }}
-                                                            />
-                                                        </label>
                                                     </div>
                                                 </div>
                                             </div>
@@ -647,6 +662,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                     <tr style={{ borderBottom: '2px solid #30363d' }}>
                                         <th style={{ padding: '10px 8px', textAlign: 'center', color: '#8b949e', fontWeight: 600, width: 60 }}>✓</th>
                                         <th style={{ padding: '10px 6px', textAlign: 'center', color: '#BD00FF', fontWeight: 600, width: 50 }}>👁</th>
+                                        <th style={{ padding: '10px 6px', textAlign: 'center', color: '#8b949e', fontWeight: 600, width: 50 }} title="Evaluar Medida">⚖️</th>
                                         <th style={{ padding: '10px 12px', textAlign: 'left', color: '#8b949e', fontWeight: 600 }}>Etiqueta Roboflow</th>
                                         <th style={{ padding: '10px 12px', textAlign: 'center', color: '#8b949e', fontWeight: 600, width: 130 }}>Valor Medido (mm)</th>
                                         <th style={{ padding: '10px 12px', textAlign: 'center', color: '#8b949e', fontWeight: 600, width: 130 }}>Tol. + (mm)</th>
@@ -702,6 +718,15 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                         {tol.visible ? '👁' : '🚫'}
                                                     </button>
                                                 </td>
+                                                <td style={{ padding: '8px 6px', textAlign: 'center' }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={tol.compareEnabled !== false}
+                                                        onChange={(e) => updateTolerance(idx, 'compareEnabled', e.target.checked)}
+                                                        style={{ width: 16, height: 16, cursor: 'pointer', accentColor: '#2ea043' }}
+                                                        title="Evaluar Medida en Prueba"
+                                                    />
+                                                </td>
                                                 <td style={{ padding: '8px 12px', fontWeight: 600, color: tol.enabled ? '#e6edf3' : '#484f58' }}>
                                                     <span style={{
                                                         display: 'inline-block', width: 10, height: 10, borderRadius: '50%', marginRight: 8,
@@ -711,9 +736,11 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                                 </td>
                                                 <td style={{ padding: '8px 12px', textAlign: 'center' }}>
                                                     <input
-                                                        type="number" step="0.01" value={tol.measuredValue}
+                                                        type="number" step="0.01" value={tol.measuredValue || 0}
+                                                        readOnly={true}
                                                         style={{
                                                             width: '100%', padding: '6px 8px', background: '#161b22', border: '1px solid #30363d',
+                                                            color: '#e6edf3', cursor: 'not-allowed'
                                                         }}
                                                     />
                                                 </td>
@@ -754,6 +781,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                             className: name.trim(),
                                             enabled: true,
                                             visible: true,
+                                            compareEnabled: true,
                                             measuredValue: 0,
                                             tolerancePlus: 0.5,
                                             toleranceMinus: 0.5,
@@ -960,6 +988,349 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, onMa
                                 ))}
                             </div>
                         )}
+                    </div>
+                ) : configTab === 'registro' ? (
+                    /* ═══ REGISTRO FACIAL ═══ */
+                    <div style={{ maxWidth: 980, margin: '0 auto' }}>
+                        <h2 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: 6, color: '#fff', display: 'flex', alignItems: 'center', gap: 8 }}>
+                            👤 Registro Biométrico Facial
+                        </h2>
+                        <p style={{ fontSize: '0.82rem', color: '#8b949e', marginBottom: 20 }}>
+                            Registra tu perfil biométrico mediante detección de vida (parpadeos). La cámara debe estar conectada.
+                        </p>
+
+                        {/* Estado del módulo */}
+                        {faceStatus && (
+                            <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
+                                {[
+                                    { label: 'face_service', ok: faceStatus.face_service },
+                                    { label: 'mediapipe',    ok: faceStatus.mediapipe },
+                                    { label: 'face_recognition', ok: faceStatus.face_recognition },
+                                ].map(dep => (
+                                    <span key={dep.label} style={{
+                                        fontSize: '0.72rem', fontWeight: 700, padding: '3px 10px',
+                                        borderRadius: 20, border: `1px solid ${dep.ok ? '#2ea04380' : '#f8514980'}`,
+                                        background: dep.ok ? '#0d2c1a' : '#2d0f0f', color: dep.ok ? '#3fb950' : '#f85149',
+                                    }}>
+                                        {dep.ok ? '✔' : '✖'} {dep.label}
+                                    </span>
+                                ))}
+                                {!faceStatus.mediapipe && (
+                                    <span style={{ fontSize: '0.72rem', color: '#e3b341', background: '#2d2010', border: '1px solid #e3b34140', padding: '3px 10px', borderRadius: 20 }}>
+                                        ⚠ pip install mediapipe face_recognition
+                                    </span>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Estado y Preview SUPERIOR */}
+                        {regActive && regState && (
+                            <div style={{ background: '#0d1117', border: '1px solid #30363d', borderRadius: 10, padding: 18, marginBottom: 20 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                                    <div style={{ flex: 1, marginRight: 20 }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#8b949e', marginBottom: 6 }}>
+                                            <span>👁 Parpadeos detectados</span>
+                                            <span style={{ fontWeight: 700, color: '#e3b341' }}>{regState.blinks}/3</span>
+                                        </div>
+                                        <div style={{ height: 8, background: '#21262d', borderRadius: 4, overflow: 'hidden' }}>
+                                            <div style={{
+                                                height: '100%', borderRadius: 4, transition: 'width 0.3s',
+                                                width: `${Math.min(100, (regState.blinks / 3) * 100)}%`,
+                                                background: regState.step >= 1 ? '#3fb950' : 'linear-gradient(90deg, #1f6feb, #388bfd)',
+                                            }} />
+                                        </div>
+                                    </div>
+                                    <div style={{
+                                        padding: '10px 16px', borderRadius: 6, fontSize: '0.85rem', fontWeight: 600,
+                                        background: regState.step >= 1 ? '#0d2c1a' : '#161b22',
+                                        border: `1px solid ${regState.step >= 1 ? '#2ea04360' : '#30363d'}`,
+                                        color: regState.step >= 1 ? '#3fb950' : '#e6edf3',
+                                        display: 'flex', alignItems: 'center', gap: 10, minWidth: 200, justifyContent: 'center'
+                                    }}>
+                                        {regState.step >= 1 ? '✅' : <span style={{ animation: 'pulse 1s infinite', display: 'inline-block' }}>📹</span>}
+                                        {regState.status_msg || 'Procesando...'}
+                                    </div>
+                                </div>
+                                {regState.last_frame_b64 && (
+                                    <div style={{ borderRadius: 8, overflow: 'hidden', border: '2px solid #30363d', background: '#000', display: 'flex', justifyContent: 'center' }}>
+                                        <img src={regState.last_frame_b64} alt="Proceso" style={{ maxWidth: '100%', maxHeight: '600px', display: 'block', objectFit: 'contain' }} />
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(350px, 1fr) 2fr', gap: 20, alignItems: 'start' }}>
+
+                            {/* Panel izquierdo: formulario de registro */}
+                            <div style={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 10, padding: 18 }}>
+                                <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff', marginBottom: 14 }}>
+                                    ➕ Nuevo Registro
+                                </h3>
+
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
+                                    <div>
+                                        <label style={{ fontSize: '0.75rem', color: '#8b949e', display: 'block', marginBottom: 4 }}>Nombre completo</label>
+                                        <input
+                                            id="face-reg-fullname"
+                                            type="text"
+                                            value={regFullname}
+                                            onChange={e => setRegFullname(e.target.value)}
+                                            disabled={regActive}
+                                            placeholder="Ej: Francisco Estella"
+                                            style={{
+                                                width: '100%', padding: '8px 10px', background: '#0d1117',
+                                                border: '1px solid #30363d', borderRadius: 6, color: '#e6edf3',
+                                                fontSize: '0.85rem', boxSizing: 'border-box',
+                                            }}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label style={{ fontSize: '0.75rem', color: '#8b949e', display: 'block', marginBottom: 4 }}>Nombre de usuario (ID único)</label>
+                                        <input
+                                            id="face-reg-username"
+                                            type="text"
+                                            value={regUsername}
+                                            onChange={e => setRegUsername(e.target.value.toLowerCase().replace(/\s+/g, '_'))}
+                                            disabled={regActive}
+                                            placeholder="Ej: fran_estella"
+                                            style={{
+                                                width: '100%', padding: '8px 10px', background: '#0d1117',
+                                                border: '1px solid #30363d', borderRadius: 6, color: '#e6edf3',
+                                                fontSize: '0.85rem', fontFamily: 'monospace', boxSizing: 'border-box',
+                                            }}
+                                        />
+                                    </div>
+                                </div>
+
+                                {regError && (
+                                    <div style={{ background: '#2d0f0f', border: '1px solid #f8514960', borderRadius: 6, padding: '8px 12px', marginBottom: 10, fontSize: '0.78rem', color: '#f85149' }}>
+                                        ⚠ {regError}
+                                    </div>
+                                )}
+
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    {!regActive ? (
+                                        <button
+                                            id="face-reg-start-btn"
+                                            onClick={async () => {
+                                                if (!regUsername.trim()) { setRegError('Introduce un nombre de usuario'); return; }
+                                                setRegError('');
+                                                try {
+                                                    const res = await fetch('http://localhost:8765/api/face/registration/start', {
+                                                        method: 'POST',
+                                                        headers: { 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ username: regUsername.trim(), fullname: regFullname.trim() || regUsername.trim() }),
+                                                    });
+                                                    const d = await res.json();
+                                                    if (d.ok) {
+                                                        setRegActive(true);
+                                                        setRegState(null);
+                                                        // Polling cáda 300ms
+                                                        regPollRef.current = setInterval(async () => {
+                                                            try {
+                                                                const sr = await fetch('http://localhost:8765/api/face/registration/status');
+                                                                const sd = await sr.json();
+                                                                if (sd.ok) {
+                                                                    setRegState(sd.state);
+                                                                    if (sd.state?.done || !sd.state?.active) {
+                                                                        clearInterval(regPollRef.current!);
+                                                                        regPollRef.current = null;
+                                                                        setRegActive(false);
+                                                                        if (sd.state?.done && !sd.state?.error) {
+                                                                            setRegUsername('');
+                                                                            setRegFullname('');
+                                                                            // Refrescar lista
+                                                                            const ur = await fetch('http://localhost:8765/api/face/users');
+                                                                            const ud = await ur.json();
+                                                                            if (ud.ok) setFaceUsers(ud.users || []);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            } catch (_) {}
+                                                        }, 300);
+                                                    } else {
+                                                        setRegError(d.error || 'Error desconocido');
+                                                    }
+                                                } catch (e: any) {
+                                                    setRegError('No se puede conectar al servidor: ' + e.message);
+                                                }
+                                            }}
+                                            style={{
+                                                flex: 1, padding: '9px 14px', borderRadius: 7, cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem',
+                                                background: 'linear-gradient(135deg, #238636, #2ea043)', color: '#fff', border: 'none',
+                                                boxShadow: '0 2px 8px rgba(46,160,67,0.4)', transition: 'all 0.2s',
+                                            }}
+                                        >
+                                            📷 Iniciar Registro
+                                        </button>
+                                    ) : (
+                                        <button
+                                            id="face-reg-stop-btn"
+                                            onClick={async () => {
+                                                if (regPollRef.current) { clearInterval(regPollRef.current); regPollRef.current = null; }
+                                                await fetch('http://localhost:8765/api/face/registration/stop', { method: 'POST', body: '{}' });
+                                                setRegActive(false);
+                                            }}
+                                            style={{
+                                                flex: 1, padding: '9px 14px', borderRadius: 7, cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem',
+                                                background: 'linear-gradient(135deg, #b62324, #da3633)', color: '#fff', border: 'none',
+                                            }}
+                                        >
+                                            ⏹ Cancelar
+                                        </button>
+                                    )}
+                                </div>
+
+
+                                {/* Resultado final */}
+                                {!regActive && regState?.done && (
+                                    <div style={{
+                                        marginTop: 12, padding: '10px 14px', borderRadius: 8,
+                                        background: regState.error ? '#2d0f0f' : '#0d2c1a',
+                                        border: `1px solid ${regState.error ? '#f8514960' : '#2ea04360'}`,
+                                        color: regState.error ? '#f85149' : '#3fb950', fontSize: '0.82rem',
+                                    }}>
+                                        {regState.error ? `✖ ${regState.error}` : `✅ ${regState.status_msg}`}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Panel derecho: lista de usuarios + verificación */}
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+                                {/* Usuarios registrados */}
+                                <div style={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 10, padding: 18 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                                        <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff', margin: 0 }}>
+                                            📁 Usuarios Registrados ({faceUsers.length})
+                                        </h3>
+                                        <button
+                                            onClick={async () => {
+                                                const r = await fetch('http://localhost:8765/api/face/users');
+                                                const d = await r.json();
+                                                if (d.ok) setFaceUsers(d.users || []);
+                                            }}
+                                            style={{ padding: '4px 10px', background: '#21262d', border: '1px solid #30363d', borderRadius: 6, color: '#8b949e', cursor: 'pointer', fontSize: '0.75rem' }}
+                                        >
+                                            🔄 Refrescar
+                                        </button>
+                                    </div>
+
+                                    {faceUsers.length === 0 ? (
+                                        <div style={{ textAlign: 'center', padding: '20px 0', color: '#484f58', fontSize: '0.82rem' }}>
+                                            No hay usuarios registrados.
+                                        </div>
+                                    ) : (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                            {faceUsers.map((u, i) => (
+                                                <div key={i} style={{
+                                                    display: 'flex', alignItems: 'center', gap: 10,
+                                                    padding: '8px 10px', background: '#0d1117',
+                                                    borderRadius: 8, border: '1px solid #21262d',
+                                                }}>
+                                                    {/* Avatar */}
+                                                    <UserAvatar username={u.username} />
+                                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                                        <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#e6edf3', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                            {u.fullname || u.username}
+                                                        </div>
+                                                        <div style={{ fontSize: '0.7rem', color: '#8b949e', fontFamily: 'monospace' }}>{u.username}</div>
+                                                        {u.registered_at && (
+                                                            <div style={{ fontSize: '0.67rem', color: '#484f58' }}>{u.registered_at.replace('T', ' ').slice(0, 16)}</div>
+                                                        )}
+                                                    </div>
+                                                    <span style={{ fontSize: '0.68rem', padding: '2px 7px', borderRadius: 10, background: u.has_face ? '#0d2c1a' : '#2d0f0f', color: u.has_face ? '#3fb950' : '#f85149', border: `1px solid ${u.has_face ? '#2ea04330' : '#f8514930'}` }}>
+                                                        {u.has_face ? '👁 cara OK' : 'sin foto'}
+                                                    </span>
+                                                    <button
+                                                        onClick={async () => {
+                                                            if (!confirm(`¿Eliminar a "${u.username}" de la base de datos?`)) return;
+                                                            const r = await fetch('http://localhost:8765/api/face/user/delete', {
+                                                                method: 'POST',
+                                                                headers: { 'Content-Type': 'application/json' },
+                                                                body: JSON.stringify({ username: u.username }),
+                                                            });
+                                                            const d = await r.json();
+                                                            if (d.ok) {
+                                                                const ur = await fetch('http://localhost:8765/api/face/users');
+                                                                const ud = await ur.json();
+                                                                if (ud.ok) setFaceUsers(ud.users || []);
+                                                            }
+                                                        }}
+                                                        style={{
+                                                            padding: '4px 8px', background: 'transparent', border: '1px solid #f8514940',
+                                                            borderRadius: 5, color: '#f85149', cursor: 'pointer', fontSize: '0.72rem', flexShrink: 0,
+                                                        }}
+                                                    >
+                                                        🗑
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Panel de verificación */}
+                                <div style={{ background: '#161b22', border: '1px solid #30363d', borderRadius: 10, padding: 18 }}>
+                                    <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff', marginBottom: 12 }}>
+                                        🔐 Verificar Identidad
+                                    </h3>
+                                    <p style={{ fontSize: '0.78rem', color: '#8b949e', marginBottom: 12 }}>
+                                        Compara el rostro actual de la cámara con la base de datos registrada.
+                                    </p>
+                                    <button
+                                        id="face-verify-btn"
+                                        disabled={faceVerifying}
+                                        onClick={async () => {
+                                            setFaceVerifying(true);
+                                            setFaceVerifyResult(null);
+                                            try {
+                                                const r = await fetch('http://localhost:8765/api/face/verify', { method: 'POST', body: '{}' });
+                                                const d = await r.json();
+                                                setFaceVerifyResult(d);
+                                            } catch (e: any) {
+                                                setFaceVerifyResult({ ok: false, error: 'Error de conexión: ' + e.message });
+                                            } finally {
+                                                setFaceVerifying(false);
+                                            }
+                                        }}
+                                        style={{
+                                            width: '100%', padding: '9px 14px', borderRadius: 7, cursor: faceVerifying ? 'not-allowed' : 'pointer',
+                                            fontWeight: 700, fontSize: '0.82rem', border: 'none',
+                                            background: faceVerifying ? '#21262d' : 'linear-gradient(135deg, #1f6feb, #388bfd)',
+                                            color: faceVerifying ? '#484f58' : '#fff', transition: 'all 0.2s',
+                                        }}
+                                    >
+                                        {faceVerifying ? '⏳ Analizando...' : '🔍 Verificar ahora'}
+                                    </button>
+
+                                    {faceVerifyResult && (
+                                        <div style={{
+                                            marginTop: 12, padding: '12px 14px', borderRadius: 8,
+                                            background: faceVerifyResult.ok ? '#0d2c1a' : '#2d0f0f',
+                                            border: `1px solid ${faceVerifyResult.ok ? '#2ea04360' : '#f8514960'}`,
+                                        }}>
+                                            {faceVerifyResult.ok ? (
+                                                <>
+                                                    <div style={{ fontSize: '1rem', fontWeight: 700, color: '#3fb950', marginBottom: 4 }}>
+                                                        ✅ Identificado
+                                                    </div>
+                                                    <div style={{ fontSize: '0.85rem', color: '#e6edf3' }}>{faceVerifyResult.fullname}</div>
+                                                    <div style={{ fontSize: '0.72rem', color: '#8b949e', fontFamily: 'monospace' }}>@{faceVerifyResult.username}</div>
+                                                    <div style={{ fontSize: '0.7rem', color: '#484f58', marginTop: 4 }}>
+                                                        Distancia: {(faceVerifyResult.distance * 100).toFixed(1)}%
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <div style={{ fontSize: '0.85rem', color: '#f85149' }}>
+                                                    ❌ {faceVerifyResult.error || 'Rostro no reconocido'}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 ) : null}
             </div>
