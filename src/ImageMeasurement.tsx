@@ -1419,7 +1419,7 @@ const ImageMeasurement: React.FC = () => {
 
 
 
-                {/* ── SAM 3 — Detección de Personas ── */}
+                {/* ── Cálculo de tiempo ciclo ── */}
                 <div style={{
                     ...styles.modeSelector,
                     borderTop: '2px solid #7c3aed',
@@ -1430,7 +1430,7 @@ const ImageMeasurement: React.FC = () => {
                     border: `2px solid ${sam3Active ? '#7c3aed' : '#30363d'}`,
                 }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <h3 style={{ margin: 0, fontSize: '14px', color: '#a78bfa' }}>🧠 SAM 3</h3>
+                        <h3 style={{ margin: 0, fontSize: '14px', color: '#a78bfa' }}>🧠 Cálculo de tiempo ciclo</h3>
                         <span style={{
                             fontSize: '9px',
                             background: sam3Active ? '#7c3aed30' : '#30363d30',
@@ -1444,7 +1444,7 @@ const ImageMeasurement: React.FC = () => {
                     </div>
 
                     <div style={{ fontSize: '10px', color: '#6e7681', marginTop: 2, marginBottom: 8 }}>
-                        Detecta personas automáticamente en la imagen o vídeo
+                        Detecta personas automáticamente en la imagen o vídeo para el cálculo de tiempo ciclo
                     </div>
 
 
@@ -1538,7 +1538,7 @@ const ImageMeasurement: React.FC = () => {
                             }
                         }}
                     >
-                        {sam3Loading ? '⏳ Buscando personas...' : sam3Active ? '🛑 Desactivar SAM3' : '🧠 Activar SAM3'}
+                        {sam3Loading ? '⏳ Procesando...' : sam3Active ? '🛑 Desactivar cálculo' : '🧠 Activar cálculo'}
                     </button>
 
                     {sam3Result && (
