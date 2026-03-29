@@ -18,13 +18,14 @@ interface ObjViewerProps {
     mtlUrl?: string;
     fileName: string;
     objElementName?: string;
+    objElementName2?: string;
     ralColor?: string;
     modelSpecs?: ModelSpecs;
     onSpecsUpdate?: (specs: ModelSpecs) => void;
     onClose: () => void;
 }
 
-const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, objElementName, ralColor, modelSpecs = {}, onSpecsUpdate, onClose }) => {
+const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, objElementName, objElementName2, ralColor, modelSpecs = {}, onSpecsUpdate, onClose }) => {
     const mountRef = useRef<HTMLDivElement>(null);
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
     const sceneRef = useRef<THREE.Scene | null>(null);
@@ -276,16 +277,19 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, objElem
     useEffect(() => {
         if (!ralColor || !sceneRef.current) return;
         const color = new THREE.Color(ralColor);
-        const targetName = objElementName?.trim().toLowerCase();
+        const targetName1 = objElementName?.trim().toLowerCase();
+        const targetName2 = objElementName2?.trim().toLowerCase();
 
         sceneRef.current.traverse((child) => {
             if (!(child as THREE.Mesh).isMesh) return;
             const mesh = child as THREE.Mesh;
 
-            // If objElementName is specified, match by name; otherwise color all meshes
-            if (targetName) {
+            // If objElementName(s) are specified, match by name; otherwise color all meshes
+            if (targetName1 || targetName2) {
                 const meshName = (mesh.name || mesh.parent?.name || '').toLowerCase();
-                if (!meshName.includes(targetName)) return;
+                const matches1 = targetName1 && meshName.includes(targetName1);
+                const matches2 = targetName2 && meshName.includes(targetName2);
+                if (!matches1 && !matches2) return;
             }
 
             // Clone material to avoid shared references, apply color
@@ -300,7 +304,7 @@ const ObjViewer: React.FC<ObjViewerProps> = ({ objUrl, mtlUrl, fileName, objElem
                 (mesh.material as THREE.MeshPhongMaterial).color = color;
             }
         });
-    }, [ralColor, objElementName]);
+    }, [ralColor, objElementName, objElementName2]);
 
     // Close on Escape key
     useEffect(() => {

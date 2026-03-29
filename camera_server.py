@@ -2505,6 +2505,64 @@ class CameraHandler(BaseHTTPRequestHandler):
                 print(f"[SAM3 ERROR] {e}")
                 print(traceback.format_exc())
                 self._json_response({"ok": False, "error": str(e)})
+        # ── /api/time-cycle/detect — Run the time-in-zone workflow on a frame ──
+        elif path == "/api/time-cycle/detect":
+            import traceback, requests
+            try:
+                b64_str = params.get("image", "")
+                if not b64_str:
+                    self._json_response({"ok": False, "error": "No image provided"})
+                    return
+
+                # Decode the base64 string
+                raw_b64 = b64_str.split(",")[1] if "," in b64_str else b64_str
+
+                api_key = "K6YHioHqtuwbsNmR2n7O"
+                url = "https://serverless.roboflow.com/infer/workflows/welding-hqci3/time-in-zone"
+
+                payload = {
+                    "api_key": api_key,
+                    "inputs": {
+                        "image": {"type": "base64", "value": raw_b64}
+                    }
+                }
+
+                resp = requests.post(url, json=payload, timeout=60)
+                resp.raise_for_status()
+                res = resp.json()
+
+                if isinstance(res, list) and len(res) > 0:
+                    data = res[0]
+                else:
+                    data = res
+
+                # Extract the rendered output image and predictions
+                output_image_b64 = None
+                if "output_image" in data and "value" in data["output_image"]:
+                    output_image_b64 = "data:image/jpeg;base64," + data["output_image"]["value"]
+
+                detections = []
+                if "predictions" in data and isinstance(data["predictions"], list):
+                    detections = data["predictions"]
+
+                # Add some unique identifier to differentiate them as time-cycle
+                for det in detections:
+                    det["_time_cycle"] = True
+
+                time_in_zone_data = data.get("time_in_zone", [])
+
+                self._json_response({
+                    "ok": True,
+                    "detections": detections,
+                    "output_image": output_image_b64,
+                    "time_in_zone": time_in_zone_data,
+                    "summary": f"Time-Cycle: processed frame, got {len(detections)} objects, {len(time_in_zone_data)} zones"
+                })
+
+            except Exception as e:
+                print(f"[TIME-CYCLE ERROR] {e}")
+                print(traceback.format_exc())
+                self._json_response({"ok": False, "error": str(e)})
 
         # ── /api/sam3/remove — SAM 3 detect + remove persons (shortcut)
         elif path == "/api/sam3/remove":

@@ -39,6 +39,7 @@ const ImageMeasurement: React.FC = () => {
     const [sam3Active, setSam3Active] = useState(false);
     const [sam3Detections, setSam3Detections] = useState<any[]>([]);
     const sam3DetectionsRef = useRef<any[]>([]);
+    const [timeCycleImageSrc, setTimeCycleImageSrc] = useState<string | null>(null);
 
     // ── Calibración (lee de localStorage, se guarda desde la pantalla de Calibración)
     const [mmPerPx, setMmPerPx] = useState<number>(() => {
@@ -394,7 +395,7 @@ const ImageMeasurement: React.FC = () => {
         const frameSrc = tempCanvas.toDataURL('image/jpeg', 0.3);
 
         try {
-            const response = await fetch('http://localhost:8765/api/sam3/detect', {
+            const response = await fetch('http://localhost:8765/api/time-cycle/detect', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -689,10 +690,10 @@ const ImageMeasurement: React.FC = () => {
         const video = videoElementRef.current;
         if (!video) return;
         if (video.paused) {
-            video.play().then(() => {
-                setIsVideoPlaying(true);
-                startVideoRenderLoop();
-            });
+            video.play();
+            setIsVideoPlaying(true);
+            setTimeCycleImageSrc(null); // Clear time cycle on playback
+            startVideoRenderLoop();
         } else {
             video.pause();
             setIsVideoPlaying(false);
@@ -705,6 +706,7 @@ const ImageMeasurement: React.FC = () => {
         if (!video) return;
         video.currentTime = time;
         setVideoCurrentTime(time);
+        setTimeCycleImageSrc(null); // Clear time cycle overlay on seek
     };
 
     const loadImage = (file: File) => {
@@ -804,6 +806,7 @@ const ImageMeasurement: React.FC = () => {
         setPoints([]);
         setCurrentSegmentStart(null);
         setMeasurementResult(null);
+        setTimeCycleImageSrc(null); // Clear time cycle on reset
         if (clearImageDetections) {
             setDetections([]);
         }
@@ -1202,7 +1205,6 @@ const ImageMeasurement: React.FC = () => {
                 )}
 
 
-                {/* Canvas (visible when image source is active or no source) */}
                 <canvas
                     ref={canvasRef}
                     width={1200}
@@ -1213,6 +1215,24 @@ const ImageMeasurement: React.FC = () => {
                     onMouseUp={handleMouseUp}
                     onMouseLeave={handleMouseUp}
                 />
+                {/* Time-cycle image overlay (shows Roboflow annotations/zones) */}
+                {timeCycleImageSrc && (
+                    <img 
+                        src={timeCycleImageSrc} 
+                        style={{
+                            ...styles.canvas,
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            width: '100%',
+                            height: '100%',
+                            objectFit: 'contain',
+                            pointerEvents: 'none',
+                            zIndex: 5
+                        }} 
+                        alt="Time Cycle Analysis"
+                    />
+                )}
                 {isProcessing && (
                     <div style={styles.spinnerOverlay}>
                         <div className="spinner" style={styles.spinner}></div>
@@ -1468,6 +1488,7 @@ const ImageMeasurement: React.FC = () => {
                             if (sam3Active) {
                                 setSam3Active(false);
                                 setSam3Result(null);
+                                setTimeCycleImageSrc(null);
                                 // Remove SAM3 detections from the main detections
                                 setSam3Detections([]);
                                 sam3DetectionsRef.current = [];
@@ -1495,12 +1516,13 @@ const ImageMeasurement: React.FC = () => {
                                     setSam3Result('❌ No hay imagen ni vídeo disponible');
                                     return;
                                 }
-                                const response = await fetch('http://localhost:8765/api/sam3/detect', {
+                                const response = await fetch('http://localhost:8765/api/time-cycle/detect', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({
                                         image: imgToSend,
-                                        concepts: ['person', 'forklift'],
+                                        concepts: ['person'],
+                                        confidence: sam3ConfidenceRef.current,
                                         remove: false,
                                     }),
                                 });
@@ -1508,9 +1530,19 @@ const ImageMeasurement: React.FC = () => {
                                 if (data.ok) {
                                     const rawDets = data.detections || [];
                                     const count = rawDets.length;
-                                    setSam3Result(`✅ ${count} objeto(s) detectado(s)`);
+                                    let resultMsg = `✅ ${count} objeto(s) detectado(s)`;
+                                    if (data.time_in_zone && data.time_in_zone.length > 0) {
+                                      const tz = data.time_in_zone[0];
+                                      resultMsg += ` | Ciclo: ${tz.time_in_zone.toFixed(2)}s`;
+                                    }
+                                    setSam3Result(resultMsg);
+                                    setSam3Active(true);
+                                    
+                                    if (data.output_image) {
+                                        setTimeCycleImageSrc(data.output_image);
+                                    }
+                                    
                                     if (count > 0) {
-                                        setSam3Active(true);
                                         // Usar la clase real de Roboflow (person, forklift, etc.)
                                         const sam3Dets = rawDets.map((d: any) => ({
                                             ...d,
@@ -1523,7 +1555,6 @@ const ImageMeasurement: React.FC = () => {
                                             ...sam3Dets,
                                         ]);
                                     } else {
-                                        setSam3Active(false);
                                         setSam3Detections([]);
                                     }
                                 } else {

@@ -18,6 +18,7 @@ interface VideoMapping {
     label: string;
     robotProgram?: string;
     objElementName?: string;
+    objElementName2?: string;
     videoFile: string;
     videoBlobUrl?: string;
     objFile?: string;
@@ -458,7 +459,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, setA
                                                 />
                                             </div>
 
-                                            {/* Object Element Name field */}
+                                            {/* Object Element Name field 1 */}
                                             <div>
                                                 <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
                                                     🎯 Nombre Objeto (en .obj)
@@ -471,6 +472,24 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, setA
                                                         width: '100%', padding: '8px 12px', background: '#0d1117',
                                                         border: `1px solid ${map.objElementName ? '#d29922' : '#30363d'}`, borderRadius: 6,
                                                         color: map.objElementName ? '#d29922' : '#e6edf3',
+                                                        fontSize: '0.85rem', fontWeight: 600, boxSizing: 'border-box',
+                                                    }}
+                                                />
+                                            </div>
+
+                                            {/* Object Element Name field 2 */}
+                                            <div>
+                                                <label style={{ fontSize: '0.72rem', color: '#8b949e', display: 'block', marginBottom: 4, fontWeight: 600 }}>
+                                                    🎯 Nombre Objeto 2 (en .obj)
+                                                </label>
+                                                <input
+                                                    type="text" value={map.objElementName2 || ''}
+                                                    onChange={(e) => setMappings(mappings.map(m => m.id === map.id ? { ...m, objElementName2: e.target.value } : m))}
+                                                    placeholder="Ej: Puerta_Der"
+                                                    style={{
+                                                        width: '100%', padding: '8px 12px', background: '#0d1117',
+                                                        border: `1px solid ${map.objElementName2 ? '#d29922' : '#30363d'}`, borderRadius: 6,
+                                                        color: map.objElementName2 ? '#d29922' : '#e6edf3',
                                                         fontSize: '0.85rem', fontWeight: 600, boxSizing: 'border-box',
                                                     }}
                                                 />
@@ -1342,6 +1361,7 @@ const ConfigScreen: React.FC<ConfigScreenProps> = ({ mappings, setMappings, setA
                     mtlUrl={viewingObj.mtlUrl}
                     fileName={viewingObj.fileName}
                     objElementName={mappings.find(m => m.id === viewingObj.mappingId)?.objElementName}
+                    objElementName2={mappings.find(m => m.id === viewingObj.mappingId)?.objElementName2}
                     ralColor={(() => {
                         const specs = mappings.find(m => m.id === viewingObj.mappingId)?.modelSpecs;
                         if (specs?.color) {
